@@ -92,6 +92,16 @@ batt_temp() {
 
 gpu_temp() { get "$GPU/temp"; }
 
+# 毫摄氏度 -> "39.7℃"; 解析不了就原样输出, 不吞掉异常值
+fmt_t() {
+    local v="$1" neg="" i d
+    case "$v" in -*) neg="-"; v=${v#-} ;; esac
+    is_num "$v" || { echo "${1:-NA}"; return 0; }
+    i=$((v / 1000))
+    d=$(( (v % 1000) / 100 ))
+    echo "${neg}$i.$d℃"
+}
+
 # ---------------- 频率换算 ----------------
 avail_list() { get "$CFG/policy$1/scaling_available_frequencies"; }
 
@@ -505,7 +515,7 @@ cmd_gpu() {
     echo "GPU 已设为等级 $lvl = $(gpu_level_mhz "$lvl")MHz"
 }
 
-cmd_temp() { echo "CPU=$(cpu_temp) GPU=$(gpu_temp) 电池=$(batt_temp)"; }
+cmd_temp() { echo "CPU=$(fmt_t "$(cpu_temp)") GPU=$(fmt_t "$(gpu_temp)") 电池=$(fmt_t "$(batt_temp)")"; }
 
 # ---------------- 限核 ----------------
 cmd_core() {
@@ -652,7 +662,19 @@ cmd___watch() {
 # ---------------- WebUI ----------------
 web_port() { local p; p=$(get "$STATE/web_port"); is_num "$p" || p=8088; echo "$p"; }
 port_busy() { echo | "$BB" nc -w 1 127.0.0.1 "$1" >/dev/null 2>&1; }
-web_alive() { port_busy "$(web_port)"; }
+
+# 端口被占 != 进程可用: 模块目录整体替换后旧 httpd 仍占着端口,
+# 但 cwd 指向已删除的旧 webroot, 所有请求都 404。
+web_cwd_ok() {
+    local pid cwd
+    pid=$(get "$STATE/web.pid")
+    is_num "$pid" || return 1
+    [ -d "/proc/$pid" ] || return 1
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
+    [ "$cwd" = "$WEBROOT" ]
+}
+
+web_alive() { port_busy "$(web_port)" && web_cwd_ok; }
 
 kill_httpd() {
     local pid line
@@ -677,6 +699,12 @@ cmd_web_start() {
     fi
     rm -f "$STATE/web_disabled"
     [ -d "$WEBROOT" ] || { echo "WebUI 资源缺失: $WEBROOT"; return 1; }
+    # 端口被占但进程的 cwd 不是当前 webroot(升级后残留): 先清掉再起
+    if port_busy "$(web_port)"; then
+        kill_httpd
+        rm -f "$STATE/web.pid"
+        sleep 1
+    fi
     for port in 8088 8089 8090 8091 8092; do
         port_busy "$port" && continue
         sh "$MODDIR/bin/web_spawn.sh" "$port" >/dev/null 2>&1
@@ -738,10 +766,10 @@ cmd_status() {
     else
         echo "核心    : $cs  在线 $on/8  目标 $wm"
     fi
-    echo "温度    : CPU $(cpu_temp)  GPU $(gpu_temp)  电池 $(batt_temp)"
+    echo "温度    : CPU $(fmt_t "$(cpu_temp)")  GPU $(fmt_t "$(gpu_temp)")  电池 $(fmt_t "$(batt_temp)")"
     cmd_watch_status
     local lim; lim=$(get "$STATE/temp_limit"); is_num "$lim" || lim=48000
-    echo "温度上限: $lim"
+    echo "温度上限: $(fmt_t "$lim")"
     [ -f "$STATE/throttled" ] && [ "$(get "$STATE/throttled")" = "1" ] && echo "注意    : 已达温度上限, 暂时让权给系统温控"
     cmd_web_status
 }

@@ -50,21 +50,21 @@ Redmi K90 Pro Max 的 **CPU + GPU** 频率档位管理模块。
 
 **方式一：管理器刷入**
 
-下载 Release 里的 `K90ProMax-cpuctl-v1.4.0.zip`，在 KernelSU / Magisk 的「模块 → 从本地安装」中选它。
+下载 Release 里的 `K90ProMax-cpuctl-v1.4.1.zip`，在 KernelSU / Magisk 的「模块 → 从本地安装」中选它。
 
 **方式二：命令行**
 
 ```bash
-adb push K90ProMax-cpuctl-v1.4.0.zip /data/local/tmp/
-su -c 'magisk --install-module /data/local/tmp/K90ProMax-cpuctl-v1.4.0.zip'
+adb push K90ProMax-cpuctl-v1.4.1.zip /data/local/tmp/
+su -c 'magisk --install-module /data/local/tmp/K90ProMax-cpuctl-v1.4.1.zip'
 ```
 
 **方式三：不重启立即用（临时 root 场景）**
 
 ```bash
-adb push K90ProMax-cpuctl-v1.4.0.zip /data/local/tmp/
+adb push K90ProMax-cpuctl-v1.4.1.zip /data/local/tmp/
 su -c 'M=/data/adb/modules/k90_cpuctl; rm -rf $M; mkdir -p $M; \
-       busybox unzip -o /data/local/tmp/K90ProMax-cpuctl-v1.4.0.zip -d $M >/dev/null; \
+       busybox unzip -o /data/local/tmp/K90ProMax-cpuctl-v1.4.1.zip -d $M >/dev/null; \
        chmod 755 $M/bin/* $M/service.sh $M/action.sh $M/uninstall.sh \
                  $M/webroot/cgi-bin/api.cgi'
 su -c '/data/adb/modules/k90_cpuctl/bin/cpuctl boot'
