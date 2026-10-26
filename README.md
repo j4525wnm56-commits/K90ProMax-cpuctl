@@ -23,7 +23,7 @@ Redmi K90 Pro Max 的 **CPU + GPU** 频率档位管理模块。
 ## 特性
 
 - **9 个档位**：出厂默认 / 最低频率 / 极致省电 / 日常省电 / 日常均衡 / 日常增强 / 轻度游戏 / 重度游戏 / 全拉满测速
-- **GPU 联动**：每个档位同时设 CPU 与 GPU 功耗等级（`cooling_device37`，18 档 160–1200 MHz）
+- **GPU 联动**：每个档位同时设 CPU 与 GPU 功耗等级（按 `type=gpu` 动态定位冷却设备，18 档 160–1200 MHz）
 - **自定义频率**：下拉选择框 + `确认应用`。选完不生效，点确认才一次性原子写入两簇与 GPU；`恢复本档默认` 一键回到预设
 - **自动维持守护**：每 10 秒校正一次（`CPUCTL_INTERVAL` 可调），被系统偷偷改回来会拉回去；测速档 5 分钟自动回落到重度游戏
 - **温度保护**：CPU 温度达到上限（默认 48 °C）时让权给系统温控
@@ -41,7 +41,7 @@ Redmi K90 Pro Max 的 **CPU + GPU** 频率档位管理模块。
 | CPU 集群 | `policy0` = cpu0–5（6 性能核，384 MHz–3.63 GHz）、`policy6` = cpu6–7（2 超大核，768 MHz–4.61 GHz） |
 | 调速器 | `walt`（另有 `performance` / `powersave` / `schedutil` / `conservative` / `migov`） |
 | GPU | `kgsl-3d0`，18 个功耗等级：0 = 1200 MHz → 17 = 160 MHz |
-| GPU 限频点 | `cooling_device37`（`type=gpu`），`cur_state` 即功耗等级 |
+| GPU 限频点 | `type=gpu` 且 `max_state>1` 的 `cooling_device*`（**编号会变，切勿硬编码**），`cur_state` 即功耗等级 |
 
 ---
 
@@ -49,21 +49,21 @@ Redmi K90 Pro Max 的 **CPU + GPU** 频率档位管理模块。
 
 **方式一：管理器刷入**
 
-下载 Release 里的 `K90ProMax-cpuctl-v1.3.zip`，在 KernelSU / Magisk 的「模块 → 从本地安装」中选它。
+下载 Release 里的 `K90ProMax-cpuctl-v1.3.1.zip`，在 KernelSU / Magisk 的「模块 → 从本地安装」中选它。
 
 **方式二：命令行**
 
 ```bash
-adb push K90ProMax-cpuctl-v1.3.zip /data/local/tmp/
-su -c 'magisk --install-module /data/local/tmp/K90ProMax-cpuctl-v1.3.zip'
+adb push K90ProMax-cpuctl-v1.3.1.zip /data/local/tmp/
+su -c 'magisk --install-module /data/local/tmp/K90ProMax-cpuctl-v1.3.1.zip'
 ```
 
 **方式三：不重启立即用（临时 root 场景）**
 
 ```bash
-adb push K90ProMax-cpuctl-v1.3.zip /data/local/tmp/
+adb push K90ProMax-cpuctl-v1.3.1.zip /data/local/tmp/
 su -c 'M=/data/adb/modules/k90_cpuctl; rm -rf $M; mkdir -p $M; \
-       busybox unzip -o /data/local/tmp/K90ProMax-cpuctl-v1.3.zip -d $M >/dev/null; \
+       busybox unzip -o /data/local/tmp/K90ProMax-cpuctl-v1.3.1.zip -d $M >/dev/null; \
        chmod 755 $M/bin/* $M/service.sh $M/action.sh $M/uninstall.sh \
                  $M/webroot/cgi-bin/api.cgi'
 su -c '/data/adb/modules/k90_cpuctl/bin/cpuctl boot'
@@ -112,7 +112,7 @@ su -c '/data/adb/modules/k90_cpuctl/bin/cpuctl boot'
 - 游戏档会把目标值写下去，实际跑到平台当时允许的上限
 - 界面显示的是**实时生效值**，与标称值不同属正常现象
 
-GPU 侧不一样，热限频是显式可关的：原厂 `cooling_device37` 默认 `state=1`（1050 MHz），模块置 0 后 GPU 可满血 1200 MHz，实测稳定不回退。
+GPU 侧不一样，热限频是显式可关的：原厂的 GPU 冷却设备默认 `state=1`（1050 MHz），模块置 0 后 GPU 可满血 1200 MHz，实测稳定不回退。
 
 ---
 
@@ -192,7 +192,7 @@ su -c "sh $C boot"                                      # 手动跑一次开机�
 
 前端按钮、`cpuctl list`、CGI 白名单都从这张表动态生成——**加档位只改这一个文件**。
 
-运行时状态在 `/data/adb/k90_cpuctl/`：`profile`、`watch_enabled`、`web_port`、`temp_limit`、`backup/stock.conf`，以及温度 zone 缓存 `tz_cpu.list` / `tz_batt.list`（删掉会自动重建）。
+运行时状态在 `/data/adb/k90_cpuctl/`：`profile`、`watch_enabled`、`web_port`、`temp_limit`、`backup/stock.conf`，`gpu_cdev`（解析出的 GPU 冷却设备路径），以及温度 zone 缓存 `tz_cpu.list` / `tz_batt.list`（删掉都会自动重建）。
 
 ---
 
@@ -243,7 +243,7 @@ su -c "sh $C boot"                                      # 手动跑一次开机�
 |---|---|
 | 设备内 | `/data/adb/k90_cpuctl/backup/stock.conf` |
 
-快照内容：两簇的调速器与上下限、GPU 的 `min/max_pwrlevel`、`pwrscale`、`force_clk_on`、`thermal_pwrlevel`、`cooling_device35/37` 状态、`msm_performance` 限制值、`cpufreq/boost`。
+快照内容：两簇的调速器与上下限、GPU 的 `min/max_pwrlevel`、`pwrscale`、`force_clk_on`、`thermal_pwrlevel`、`cdev_gpu` / `cdev_kgsl` 的 `cur_state`（按 `type` 记录，不记编号）、`msm_performance` 限制值、`cpufreq/boost`。
 
 三种还原方式：
 
@@ -282,6 +282,8 @@ su -c "sh /data/adb/modules/k90_cpuctl/bin/cpuctl restore"   # 命令行
 | `setsid` 留空壳进程 | toybox 的 `setsid` 不支持 `-f` | 改 `nohup` |
 | 读 `max_clock_mhz` 偶发 Permission denied | 与写入同一时刻竞争 | 重试即可，无实际影响 |
 | `adb forward` 突然失效 | adb server 被重启，转发规则丢失 | 重新 `adb forward` |
+| GPU 档位写进去没反应，`cur_state` 一直是 0 | **`cooling_device` 编号每次启动都会变**：某次开机后 `cooling_device37` 变成了 `cdsp_hw`（`max_state=1`），真正的 `gpu` 落到 `35`；写 11 被静默丢弃 | `cpuctl` 里 `resolve_gpu_cdev` 按 `type` 扫出 `max_state>1` 的 `gpu`/`kgsl` 设备，结果缓存到 `$STATE/gpu_cdev`，`api.cgi` 直接读缓存（零 fork） |
+| 换机后 GPU 完全不可控 | 同上，硬编码路径换了机器必然失效 | 同上；若两个设备都在，先给 `kgsl` 写 0 放开，再给 `gpu` 写档位 |
 | 待机也耗电、内核态跑满一个核 | **内存耗尽（15 G 只剩 142 MB，swap 8.7 G）时 fork 从 2 ms 涨到 20 ms**；CGI 单请求 fork 上百次 → 一次 `state` 要 4 s，而前端每 2 s 轮询一次，请求无限堆积 | `api.cgi` 合并 sysfs 读取、缓存 thermal zone 列表、`jstr` 改纯 shell 替换；前端轮询自适应 |
 | CGI 特别慢 | `cpu_temp()` 遍历 96 个 `thermal_zone`，每个读 `type`+`temp` 两次 = 192 次 fork | 首次运行缓存 zone 路径到 `$STATE/tz_*.list`，之后一次 `awk` 读完 |
 | 一条 `printf` 发 30 个参数 | 每个 `$(get ...)` 都是一次 fork | 一次 `awk` 批量读 15 个标量，`while IFS='\|' read` 分发到变量 |

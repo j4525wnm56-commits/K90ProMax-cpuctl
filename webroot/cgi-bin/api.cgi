@@ -18,6 +18,24 @@ export PATH
 get() { cat "$1" 2>/dev/null; }
 is_num() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 
+# cooling_device 编号每次启动都可能变(实测 37 一度变成 cdsp_hw), 不能硬编码。
+# 优先读 cpuctl 落下的 $STATE/gpu_cdev 缓存(零 fork), 失效才扫一遍目录。
+resolve_gpu() {
+    local c rest d ms
+    if [ -f "$STATE/gpu_cdev" ]; then
+        IFS='|' read -r c rest < "$STATE/gpu_cdev"
+        if [ -n "$c" ] && [ -d "$c" ]; then GCDEV=$c; return 0; fi
+    fi
+    for d in /sys/class/thermal/cooling_device*; do
+        [ "$(get "$d/type")" = "gpu" ] || continue
+        ms=$(get "$d/max_state")
+        is_num "$ms" || continue
+        if [ "$ms" -gt 1 ]; then GCDEV=$d; return 0; fi
+    done
+    return 1
+}
+resolve_gpu
+
 qs="${QUERY_STRING:-}"
 getv() {
     local pair

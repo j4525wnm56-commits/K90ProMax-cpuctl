@@ -1,6 +1,6 @@
 id=k90_cpuctl
 name=K90 Pro Max 调频 (CPU+GPU)
-version=v1.3
-versionCode=4
-author=键子刘
+version=v1.3.1
+versionCode=5
+author=Langrm
 description=Redmi K90 Pro Max (myron / SM8850) 的 CPU/GPU 频率档位管理。9 个预设档位(出厂默认/最低频率/极致省电/日常省电/日常均衡/日常增强/轻度游戏/重度游戏/全拉满测速)、自定义频率(下拉选择+确认生效)、GPU 功耗等级、本地网页界面、配置备份还原。

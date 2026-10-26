@@ -17,6 +17,8 @@ CFG=/sys/devices/system/cpu/cpufreq
 P0=$CFG/policy0
 P6=$CFG/policy6
 GPU=/sys/class/kgsl/kgsl-3d0
+# cooling_device 编号在多次启动之间会变(实测 37 一度变成 cdsp_hw, gpu 落到 35),
+# 绝不能硬编码。下面两个变量只是兜底, 真正取值由 resolve_gpu_cdev 按 type 解析。
 GCDEV=/sys/class/thermal/cooling_device37
 GCDEV2=/sys/class/thermal/cooling_device35
 MSM=/sys/kernel/msm_performance/parameters
@@ -32,6 +34,25 @@ mkdir -p "$STATE" "$BACKUP"
 get() { cat "$1" 2>/dev/null; }
 
 is_num() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+# 按 type 找 GPU 冷却设备, 只认 max_state>1 的(>1 才是分档调频, =1 是一次性限制)
+# gpu -> GCDEV (写档位)   kgsl -> GCDEV2 (先置 0 放开, 避免两个设备互相压制)
+resolve_gpu_cdev() {
+    local d t ms gpu="" kgsl=""
+    for d in /sys/class/thermal/cooling_device*; do
+        t=$(get "$d/type")
+        ms=$(get "$d/max_state")
+        is_num "$ms" || continue
+        [ "$ms" -gt 1 ] || continue
+        case "$t" in
+            gpu)  [ -z "$gpu" ]  && gpu=$d ;;
+            kgsl) [ -z "$kgsl" ] && kgsl=$d ;;
+        esac
+    done
+    [ -n "$gpu" ] && GCDEV=$gpu
+    GCDEV2=${kgsl:-$GCDEV2}
+    echo "$GCDEV|$GCDEV2" > "$STATE/gpu_cdev" 2>/dev/null
+}
 
 # ---------------- 温度 ----------------
 build_tz_cache() {
@@ -162,6 +183,8 @@ gpu_set_level() {
     [ "$1" -ge 0 ] && [ "$1" -le 17 ] || return 1
     [ -w "$GCDEV2/cur_state" ] && echo 0 > "$GCDEV2/cur_state" 2>/dev/null
     echo "$1" > "$GCDEV/cur_state" 2>/dev/null
+    # 有些设备的 max_state 只有 1 或 0, 写进去会被静默丢弃, 明确报出来
+    [ "$(get "$GCDEV/cur_state")" = "$1" ]
 }
 
 gpu_enforce() {
@@ -187,8 +210,8 @@ cmd_backup() {
         echo "gpu_pwrscale=$(get "$GPU/pwrscale")"
         echo "gpu_force_clk_on=$(get "$GPU/force_clk_on")"
         echo "gpu_thermal_pwrlevel=$(get "$GPU/thermal_pwrlevel")"
-        echo "cdev35=$(get "$GCDEV2/cur_state")"
-        echo "cdev37=$(get "$GCDEV/cur_state")"
+        echo "cdev_gpu=$(get "$GCDEV/cur_state")"
+        echo "cdev_kgsl=$(get "$GCDEV2/cur_state")"
         echo "msm_cpu_max=$(get "$MSM/cpu_max_freq")"
         echo "cpufreq_boost=$(get "$CFG/boost")"
     } > "$f"
@@ -212,8 +235,11 @@ restore_stock_values() {
                 gpu_max_pwrlevel)   [ -n "$v" ] && echo "$v" > "$GPU/max_pwrlevel" 2>/dev/null ;;
                 gpu_pwrscale)       [ -n "$v" ] && echo "$v" > "$GPU/pwrscale" 2>/dev/null ;;
                 gpu_force_clk_on)   [ -n "$v" ] && echo "$v" > "$GPU/force_clk_on" 2>/dev/null ;;
-                cdev35)  [ -n "$v" ] && echo "$v" > "$GCDEV2/cur_state" 2>/dev/null ;;
-                cdev37)  [ -n "$v" ] && echo "$v" > "$GCDEV/cur_state" 2>/dev/null ;;
+                cdev_gpu)  [ -n "$v" ] && echo "$v" > "$GCDEV/cur_state" 2>/dev/null ;;
+                cdev_kgsl) [ -n "$v" ] && echo "$v" > "$GCDEV2/cur_state" 2>/dev/null ;;
+                # 兼容 v1.3 之前的旧快照键名(cdev37 当年就是 gpu 设备)
+                cdev37)    [ -n "$v" ] && echo "$v" > "$GCDEV/cur_state" 2>/dev/null ;;
+                cdev35)    [ -n "$v" ] && echo "$v" > "$GCDEV2/cur_state" 2>/dev/null ;;
                 msm_cpu_max) [ -n "$v" ] && echo "$v" > "$MSM/cpu_max_freq" 2>/dev/null ;;
             esac
         done < "$f"
@@ -549,6 +575,7 @@ cmd_status() {
     echo "CPU 0-5 : $(get "$P0/scaling_min_freq") - $(get "$P0/scaling_max_freq") kHz  now $(get "$P0/scaling_cur_freq")  [$(get "$P0/scaling_governor")]"
     echo "CPU 6-7 : $(get "$P6/scaling_min_freq") - $(get "$P6/scaling_max_freq") kHz  now $(get "$P6/scaling_cur_freq")  [$(get "$P6/scaling_governor")]"
     echo "GPU     : 等级 $(get "$GCDEV/cur_state") 上限 $(get "$GPU/max_clock_mhz")MHz  now $(get "$GPU/clock_mhz")MHz"
+    echo "GPU设备 : $GCDEV (type=$(get "$GCDEV/type") max=$(get "$GCDEV/max_state"))"
     echo "温度    : CPU $(cpu_temp)  GPU $(gpu_temp)  电池 $(batt_temp)"
     cmd_watch_status
     local lim; lim=$(get "$STATE/temp_limit"); is_num "$lim" || lim=48000
@@ -590,6 +617,8 @@ cmd_boot() {
 }
 
 # ---------------- 入口 ----------------
+resolve_gpu_cdev
+
 case "$1" in
     status)      cmd_status ;;
     list)        cmd_list ;;
