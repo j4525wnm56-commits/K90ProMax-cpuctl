@@ -25,10 +25,11 @@ Redmi K90 Pro Max 的 **CPU + GPU** 频率档位管理模块。
 - **9 个档位**：出厂默认 / 最低频率 / 极致省电 / 日常省电 / 日常均衡 / 日常增强 / 轻度游戏 / 重度游戏 / 全拉满测速
 - **GPU 联动**：每个档位同时设 CPU 与 GPU 功耗等级（`cooling_device37`，18 档 160–1200 MHz）
 - **自定义频率**：下拉选择框 + `确认应用`。选完不生效，点确认才一次性原子写入两簇与 GPU；`恢复本档默认` 一键回到预设
-- **自动维持守护**：每 3 秒校正一次，被系统偷偷改回来会拉回去；测速档 5 分钟自动回落到重度游戏
+- **自动维持守护**：每 10 秒校正一次（`CPUCTL_INTERVAL` 可调），被系统偷偷改回来会拉回去；测速档 5 分钟自动回落到重度游戏
 - **温度保护**：CPU 温度达到上限（默认 48 °C）时让权给系统温控
 - **配置备份/还原**：抓取出厂 sysfs 快照，界面按钮、命令行、卸载三个入口都能还原
 - **纯 sysfs + KGSL**：只读写 `/sys`，不注入进程、不 hook 内核
+- **低开销**：单次状态请求 ~1.4 s（优化前 4 s），前端轮询在页面闲置时自动降频到 6 s / 15 s
 
 ---
 
@@ -48,21 +49,21 @@ Redmi K90 Pro Max 的 **CPU + GPU** 频率档位管理模块。
 
 **方式一：管理器刷入**
 
-下载 Release 里的 `K90ProMax-cpuctl-v1.2.zip`，在 KernelSU / Magisk 的「模块 → 从本地安装」中选它。
+下载 Release 里的 `K90ProMax-cpuctl-v1.3.zip`，在 KernelSU / Magisk 的「模块 → 从本地安装」中选它。
 
 **方式二：命令行**
 
 ```bash
-adb push K90ProMax-cpuctl-v1.2.zip /data/local/tmp/
-su -c 'magisk --install-module /data/local/tmp/K90ProMax-cpuctl-v1.2.zip'
+adb push K90ProMax-cpuctl-v1.3.zip /data/local/tmp/
+su -c 'magisk --install-module /data/local/tmp/K90ProMax-cpuctl-v1.3.zip'
 ```
 
 **方式三：不重启立即用（临时 root 场景）**
 
 ```bash
-adb push K90ProMax-cpuctl-v1.2.zip /data/local/tmp/
+adb push K90ProMax-cpuctl-v1.3.zip /data/local/tmp/
 su -c 'M=/data/adb/modules/k90_cpuctl; rm -rf $M; mkdir -p $M; \
-       busybox unzip -o /data/local/tmp/K90ProMax-cpuctl-v1.2.zip -d $M >/dev/null; \
+       busybox unzip -o /data/local/tmp/K90ProMax-cpuctl-v1.3.zip -d $M >/dev/null; \
        chmod 755 $M/bin/* $M/service.sh $M/action.sh $M/uninstall.sh \
                  $M/webroot/cgi-bin/api.cgi'
 su -c '/data/adb/modules/k90_cpuctl/bin/cpuctl boot'
@@ -191,7 +192,29 @@ su -c "sh $C boot"                                      # 手动跑一次开机�
 
 前端按钮、`cpuctl list`、CGI 白名单都从这张表动态生成——**加档位只改这一个文件**。
 
-运行时状态在 `/data/adb/k90_cpuctl/`：`profile`、`watch_enabled`、`web_port`、`temp_limit`、`backup/stock.conf`。
+运行时状态在 `/data/adb/k90_cpuctl/`：`profile`、`watch_enabled`、`web_port`、`temp_limit`、`backup/stock.conf`，以及温度 zone 缓存 `tz_cpu.list` / `tz_batt.list`（删掉会自动重建）。
+
+---
+
+## 性能与开销
+
+调频模块本身必须是「零感知」的，否则压频率省下来的电会被守护进程自己吃掉。这台机器上一个 `fork` 在内存紧张时要 20 ms，所以脚本里的每次 `$(cat ...)` 都很贵。
+
+| 项 | v1.2 | v1.3 |
+|---|---|---|
+| 单次 `action=state` | 4.0 s | **1.4 s** |
+| 每请求 fork 次数 | 200+ | ~20 |
+| 守护校正间隔 | 3 s | 10 s |
+| 前端轮询（闲置） | 固定 2 s | 2 s → 6 s → 15 s 自适应 |
+| 页面切到后台 | 继续轮询 | 停止 |
+
+三条原则，改代码时请守住：
+
+1. **一次 `awk` 读多个文件**，不要写 `a=$(cat f1); b=$(cat f2)`，每次都是 fork。
+2. **任何「遍历一个目录再挨个读」的循环都要缓存**。96 个 thermal zone 跑一次要几百毫秒。
+3. **不要用 `sed` / `tr` 做大字符串处理**，bash/mksh 的 `${var//a/b}` 零 fork。
+
+前端轮询必须尊重三种状态：操作中快速刷新、长时间闲置降频、`document.hidden` 直接停。只写 `setInterval(2000)` 会在慢接口上把请求堆到几十个并发。
 
 ---
 
@@ -259,6 +282,9 @@ su -c "sh /data/adb/modules/k90_cpuctl/bin/cpuctl restore"   # 命令行
 | `setsid` 留空壳进程 | toybox 的 `setsid` 不支持 `-f` | 改 `nohup` |
 | 读 `max_clock_mhz` 偶发 Permission denied | 与写入同一时刻竞争 | 重试即可，无实际影响 |
 | `adb forward` 突然失效 | adb server 被重启，转发规则丢失 | 重新 `adb forward` |
+| 待机也耗电、内核态跑满一个核 | **内存耗尽（15 G 只剩 142 MB，swap 8.7 G）时 fork 从 2 ms 涨到 20 ms**；CGI 单请求 fork 上百次 → 一次 `state` 要 4 s，而前端每 2 s 轮询一次，请求无限堆积 | `api.cgi` 合并 sysfs 读取、缓存 thermal zone 列表、`jstr` 改纯 shell 替换；前端轮询自适应 |
+| CGI 特别慢 | `cpu_temp()` 遍历 96 个 `thermal_zone`，每个读 `type`+`temp` 两次 = 192 次 fork | 首次运行缓存 zone 路径到 `$STATE/tz_*.list`，之后一次 `awk` 读完 |
+| 一条 `printf` 发 30 个参数 | 每个 `$(get ...)` 都是一次 fork | 一次 `awk` 批量读 15 个标量，`while IFS='\|' read` 分发到变量 |
 
 ---
 

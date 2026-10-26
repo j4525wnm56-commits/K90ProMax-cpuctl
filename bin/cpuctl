@@ -23,7 +23,7 @@ MSM=/sys/kernel/msm_performance/parameters
 SELF=$MODDIR/bin/cpuctl
 WEBROOT=$MODDIR/webroot
 WEBCONF=$MODDIR/httpd.conf
-INTERVAL=3
+INTERVAL=${CPUCTL_INTERVAL:-10}
 
 [ -f "$MODDIR/bin/profiles.sh" ] && . "$MODDIR/bin/profiles.sh"
 mkdir -p "$STATE" "$BACKUP"

@@ -39,8 +39,11 @@ jarr() {
     printf '[%s]' "$out"
 }
 
+# 纯 shell 转义: 原来用 sed|tr 每次请求要 fork 两个进程, 而 profiles 循环里要调 30 次
 jstr() {
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\r\n'
+    local s=${1//\\/\\\\}
+    s=${s//\"/\\\"}
+    printf '%s' "$s"
 }
 
 header() {
@@ -50,30 +53,34 @@ header() {
 }
 
 # 温度: 与 cpuctl 同源, 取 cpu-[01]-* 区域最大值
-cpu_temp() {
-    local z t v max=0
+# 96 个 thermal_zone, 原来每个 zone 读 type+temp 两次, 单请求 192 次 fork,
+# 内存紧张时每次 fork 20ms 级 -> 一次 state 要 4 秒。改成缓存 zone 列表 + 一次 awk 读完。
+TZC="$STATE/tz_cpu.list"; TZB="$STATE/tz_batt.list"
+
+build_tz() {
+    : > "$TZC"; : > "$TZB"
+    local z t
     for z in /sys/class/thermal/thermal_zone*; do
         t=$(get "$z/type")
         case "$t" in
-            cpu-[01]-*)
-                v=$(get "$z/temp")
-                is_num "$v" && [ "$v" -gt "$max" ] && max=$v ;;
+            cpu-[01]-*)         echo "$z" >> "$TZC" ;;
+            battery|batt_therm) echo "$z" >> "$TZB" ;;
         esac
     done
-    echo "$max"
+}
+
+cpu_temp() {
+    [ -s "$TZC" ] || build_tz
+    [ -s "$TZC" ] || { echo 0; return; }
+    awk 'BEGIN{m=0} {v=$1+0; if(v>m)m=v} END{printf "%d", m}' \
+        $(sed 's|$|/temp|' "$TZC") 2>/dev/null
 }
 
 batt_temp() {
-    local z t v
-    for z in /sys/class/thermal/thermal_zone*; do
-        t=$(get "$z/type")
-        case "$t" in
-            battery|batt_therm)
-                v=$(get "$z/temp")
-                is_num "$v" && { echo "$v"; return 0; } ;;
-        esac
-    done
-    echo 0
+    [ -s "$TZB" ] || build_tz
+    [ -s "$TZB" ] || { echo 0; return; }
+    awk 'FNR==1 && !done && ($1+0)>0 {printf "%d", $1+0; done=1}' \
+        $(sed 's|$|/temp|' "$TZB") 2>/dev/null
 }
 
 do_state() {
@@ -90,6 +97,31 @@ do_state() {
         maxleft=$((until - now))
         [ "$maxleft" -lt 0 ] && maxleft=0
     fi
+    # 15 个标量 sysfs 一次读完(原来每个 1 次 fork)
+    local raw k v p0min=0 p0max=0 p0cur=0 p0gov="" p0av="" p6min=0 p6max=0 p6cur=0 p6gov="" p6av=""
+    local glev=0 gmax=0 gcur=0 gth=0 gfr=""
+    raw=$(awk '{printf "%s|%s\n", FILENAME, $0}' \
+        "$P0/scaling_min_freq" "$P0/scaling_max_freq" "$P0/scaling_cur_freq" \
+        "$P0/scaling_governor" "$P0/scaling_available_frequencies" \
+        "$P6/scaling_min_freq" "$P6/scaling_max_freq" "$P6/scaling_cur_freq" \
+        "$P6/scaling_governor" "$P6/scaling_available_frequencies" \
+        "$GCDEV/cur_state" "$GPU/max_clock_mhz" "$GPU/clock_mhz" \
+        "$GPU/thermal_pwrlevel" "$GPU/freq_table_mhz" 2>/dev/null)
+    while IFS='|' read -r k v; do
+        case "$k" in
+            "$P0/scaling_min_freq") p0min=$v ;; "$P0/scaling_max_freq") p0max=$v ;;
+            "$P0/scaling_cur_freq") p0cur=$v ;; "$P0/scaling_governor") p0gov=$v ;;
+            "$P0/scaling_available_frequencies") p0av=$v ;;
+            "$P6/scaling_min_freq") p6min=$v ;; "$P6/scaling_max_freq") p6max=$v ;;
+            "$P6/scaling_cur_freq") p6cur=$v ;; "$P6/scaling_governor") p6gov=$v ;;
+            "$P6/scaling_available_frequencies") p6av=$v ;;
+            "$GCDEV/cur_state") glev=$v ;; "$GPU/max_clock_mhz") gmax=$v ;;
+            "$GPU/clock_mhz") gcur=$v ;; "$GPU/thermal_pwrlevel") gth=$v ;;
+            "$GPU/freq_table_mhz") gfr=$v ;;
+        esac
+    done <<SYSEOF
+$raw
+SYSEOF
     t=$(cpu_temp); gt=$(get "$GPU/temp"); bt=$(batt_temp)
     is_num "$t" || t=0
     is_num "$gt" || gt=0
@@ -106,14 +138,11 @@ do_state() {
     printf '"maxLeft":%s,' "$maxleft"
     printf '"temp":%s,"gpuTemp":%s,"battTemp":%s,' "$t" "$gt" "$bt"
     printf '"p0":{"id":"p0","name":"性能核 0-5","cpus":"0-5","min":%s,"max":%s,"cur":%s,"gov":"%s","avail":%s},' \
-        "$(get "$P0/scaling_min_freq")" "$(get "$P0/scaling_max_freq")" "$(get "$P0/scaling_cur_freq")" \
-        "$(jstr "$(get "$P0/scaling_governor")")" "$(jarr "$(get "$P0/scaling_available_frequencies")")"
+        "$p0min" "$p0max" "$p0cur" "$(jstr "$p0gov")" "$(jarr "$p0av")"
     printf '"p6":{"id":"p6","name":"超大核 6-7","cpus":"6-7","min":%s,"max":%s,"cur":%s,"gov":"%s","avail":%s},' \
-        "$(get "$P6/scaling_min_freq")" "$(get "$P6/scaling_max_freq")" "$(get "$P6/scaling_cur_freq")" \
-        "$(jstr "$(get "$P6/scaling_governor")")" "$(jarr "$(get "$P6/scaling_available_frequencies")")"
+        "$p6min" "$p6max" "$p6cur" "$(jstr "$p6gov")" "$(jarr "$p6av")"
     printf '"gpu":{"level":%s,"maxMhz":%s,"curMhz":%s,"thermal":%s,"freqs":%s},' \
-        "$(get "$GCDEV/cur_state")" "$(get "$GPU/max_clock_mhz")" "$(get "$GPU/clock_mhz")" \
-        "$(get "$GPU/thermal_pwrlevel")" "$(jarr "$(get "$GPU/freq_table_mhz")")"
+        "$glev" "$gmax" "$gcur" "$gth" "$(jarr "$gfr")"
 
     printf '"profiles":['
     local first=1 k n d a b c e g l

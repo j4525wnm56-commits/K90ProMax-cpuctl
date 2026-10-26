@@ -441,6 +441,13 @@ $("btnRestore").onclick=function(){
   if(confirm("恢复出厂默认? 会按首次安装时保存的快照还原 CPU/GPU 全部设置。")) act("restore");
 };
 
+// 轮询间隔自适应: 刚操作过 2s, 闲置 30s 后 6s, 3 分钟没碰 15s。
+// 单次 state 请求在这台机上要 4s 左右(内存紧张时 fork 很贵), 固定 2s 只会把请求堆起来。
+var lastAct=Date.now();
+["touchstart","click","input","change","scroll","keydown"].forEach(function(e){
+  document.addEventListener(e,function(){ lastAct=Date.now(); },{passive:true});
+});
+
 function tick(){
   clearTimeout(timer);
   return api("action=state").then(function(j){
@@ -449,11 +456,15 @@ function tick(){
     $("dot").classList.remove("on");
     $("st").textContent="未连接";
   }).then(function(){
-    if(!document.hidden) timer=setTimeout(tick,2000);
+    if(document.hidden) return;
+    var idle=Date.now()-lastAct;
+    timer=setTimeout(tick, idle<30000?2000:(idle<180000?6000:15000));
   });
 }
 
-document.addEventListener("visibilitychange",function(){ if(!document.hidden) tick(); });
+document.addEventListener("visibilitychange",function(){
+  if(document.hidden){ clearTimeout(timer); } else { lastAct=Date.now(); tick(); }
+});
 
 // ?open=1 直接展开面板
 if(location.search.indexOf("open")>=0){
