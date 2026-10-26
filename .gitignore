@@ -1,0 +1,12 @@
+# 打包产物
+*.zip
+dist/
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 调试截图
+*.png
+!docs/*.png

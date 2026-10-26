@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<title>K90 Pro Max 调频</title>
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#0b0f14; --card:#141a22; --card2:#1a222c; --line:#243040;
+  --txt:#e8eef6; --dim:#8b9bb0; --dim2:#5d6d80;
+  --acc:#3ee0c5; --p0:#4da3ff; --p6:#b07bff; --gpu:#ffb648;
+  --warn:#ff9f43; --bad:#ff5d5d;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{
+  margin:0;background:var(--bg);color:var(--txt);
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:15px;line-height:1.45;
+  padding:calc(env(safe-area-inset-top,0px) + 14px) 14px calc(env(safe-area-inset-bottom,0px) + 30px);
+  font-variant-numeric:tabular-nums;
+  max-width:560px;margin:0 auto;
+}
+.hd{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.hd h1{font-size:17px;font-weight:650;margin:0;letter-spacing:.2px}
+.hd .dot{width:7px;height:7px;border-radius:50%;background:var(--dim2);flex:none;transition:.3s}
+.hd .dot.on{background:var(--acc);box-shadow:0 0 8px rgba(62,224,197,.7)}
+.hd .st{font-size:11px;color:var(--dim2);margin-left:auto}
+
+/* 集群卡片 */
+.cl{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:13px 14px;margin-bottom:10px}
+.cl .top{display:flex;align-items:baseline;gap:8px}
+.cl .nm{font-size:12.5px;color:var(--dim);font-weight:600}
+.cl .cpus{font-size:10.5px;color:var(--dim2);margin-left:auto}
+.cl .val{font-size:25px;font-weight:680;letter-spacing:-.3px;margin-top:2px}
+.cl .val small{font-size:12px;color:var(--dim);font-weight:500;margin-left:3px}
+.cl .rng{font-size:11.5px;color:var(--dim2);margin-top:1px}
+.bar{position:relative;height:5px;border-radius:3px;background:#1e2733;margin-top:9px;overflow:visible}
+.bar i{position:absolute;left:0;top:0;bottom:0;border-radius:3px;opacity:.55}
+.bar b{position:absolute;top:-2.5px;width:3px;height:10px;border-radius:2px;transform:translateX(-1.5px)}
+.p0 .val{color:var(--p0)} .p0 .bar i,.p0 .bar b{background:var(--p0)}
+.p6 .val{color:var(--p6)} .p6 .bar i,.p6 .bar b{background:var(--p6)}
+.gp .val{color:var(--gpu)} .gp .bar i,.gp .bar b{background:var(--gpu)}
+
+.sec{font-size:12px;color:var(--dim);font-weight:600;margin:18px 0 9px;display:flex;align-items:center;gap:7px}
+.sec .badge{display:none;font-size:10px;font-weight:500;color:var(--acc);background:rgba(62,224,197,.14);padding:1px 7px;border-radius:8px}
+.sec .badge.on{display:inline-block}
+
+/* 档位 */
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.prof{
+  background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:11px 12px;text-align:left;color:var(--txt);font-family:inherit;
+  transition:.16s;cursor:pointer;
+}
+.prof:active{transform:scale(.97)}
+.prof .n{font-size:14px;font-weight:640;display:block}
+.prof .d{font-size:10.5px;color:var(--dim2);display:block;margin-top:3px;line-height:1.35;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:27px}
+.prof.on{border-color:var(--acc);background:rgba(62,224,197,.09)}
+.prof.on .n{color:var(--acc)}
+
+/* 折叠面板 */
+details{background:var(--card);border:1px solid var(--line);border-radius:14px;margin-bottom:10px;overflow:hidden}
+summary{
+  list-style:none;padding:13px 14px;font-size:13.5px;font-weight:600;
+  display:flex;align-items:center;gap:8px;cursor:pointer;
+}
+summary::-webkit-details-marker{display:none}
+summary::after{
+  content:"";width:7px;height:7px;flex:none;margin-left:auto;
+  border-right:1.6px solid var(--dim2);border-bottom:1.6px solid var(--dim2);
+  transform:rotate(45deg) translate(-2px,-2px);transition:.25s;
+}
+details[open] summary::after{transform:rotate(-135deg) translate(-2px,-2px)}
+.body{padding:0 14px 14px}
+.grp{margin-top:12px}
+.grp .gh{font-size:11.5px;color:var(--dim);display:flex;align-items:center;gap:6px;margin-bottom:5px}
+.grp .gh em{font-style:normal;font-weight:600;color:var(--txt)}
+.grp .gh span{margin-left:auto;color:var(--dim2);font-size:11px}
+.srow{display:flex;align-items:center;gap:9px;padding:3px 0}
+.srow label{font-size:11.5px;color:var(--dim);width:30px;flex:none}
+.srow .num{font-size:11px;font-weight:620;width:74px;flex:none;text-align:right;color:var(--txt)}
+
+/* 频率下拉框 */
+select{
+  -webkit-appearance:none;appearance:none;
+  flex:1;min-width:0;width:100%;margin:0;
+  background:#1e2833 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238b9bb0' stroke-width='1.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 12px center;
+  border:1px solid var(--line);border-radius:10px;
+  color:var(--txt);font-family:inherit;font-size:13.5px;font-weight:620;
+  padding:10px 34px 10px 12px;
+  font-variant-numeric:tabular-nums;
+}
+select:focus{outline:none;border-color:var(--acc)}
+select option{background:#161d26;color:var(--txt)}
+.srow select.p0{border-color:rgba(77,163,255,.32)}
+.srow select.p6{border-color:rgba(176,123,255,.32)}
+.srow select.gp{border-color:rgba(255,182,72,.32)}
+input[type=range]{
+  -webkit-appearance:none;appearance:none;flex:1;height:24px;background:transparent;min-width:0;
+  touch-action:pan-y;
+}
+input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:#243040}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:17px;height:17px;border-radius:50%;
+  background:var(--acc);margin-top:-6.5px;border:2.5px solid #0b0f14;
+  box-shadow:0 0 0 1px rgba(62,224,197,.35);
+}
+input[type=range].p0::-webkit-slider-thumb{background:var(--p0);box-shadow:0 0 0 1px rgba(77,163,255,.35)}
+input[type=range].p6::-webkit-slider-thumb{background:var(--p6);box-shadow:0 0 0 1px rgba(176,123,255,.35)}
+input[type=range].gp::-webkit-slider-thumb{background:var(--gpu);box-shadow:0 0 0 1px rgba(255,182,72,.35)}
+
+/* 开关 */
+.sw{display:flex;align-items:center;gap:10px;padding:9px 0}
+.sw .t{font-size:13px}.sw .s{font-size:11px;color:var(--dim2);margin-top:1px}
+.tog{position:relative;width:44px;height:25px;flex:none;margin-left:auto}
+.tog input{opacity:0;width:100%;height:100%;margin:0;position:absolute;z-index:2}
+.tog i{position:absolute;inset:0;background:#243040;border-radius:13px;transition:.2s;pointer-events:none}
+.tog i::after{content:"";position:absolute;width:19px;height:19px;border-radius:50%;background:#8996a8;top:3px;left:3px;transition:.2s}
+.tog input:checked + i{background:rgba(62,224,197,.28)}
+.tog input:checked + i::after{background:var(--acc);transform:translateX(19px)}
+
+.btn{
+  width:100%;padding:11px;border-radius:11px;border:1px solid var(--line);
+  background:var(--card2);color:var(--txt);font-family:inherit;font-size:13px;
+  font-weight:600;margin-top:9px;cursor:pointer;
+}
+.btn:active{transform:scale(.98)}
+.btn.warn{border-color:rgba(255,159,67,.35);color:var(--warn)}
+.btn.primary{background:rgba(62,224,197,.13);border-color:rgba(62,224,197,.45);color:var(--acc)}
+.btn:disabled{opacity:.42}
+.act2{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:12px}
+.act2 .btn{margin-top:0}
+.pend{display:none;font-size:11.5px;color:var(--warn);margin-top:11px}
+.pend.on{display:block}
+
+.tip{font-size:11px;color:var(--dim2);line-height:1.5;margin-top:10px}
+.tip b{color:var(--warn);font-weight:600}
+
+#toast{
+  position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 34px);
+  transform:translate(-50%,18px);background:#1e2833;color:var(--txt);
+  border:1px solid var(--line);padding:9px 16px;border-radius:20px;font-size:12.5px;
+  opacity:0;transition:.25s;pointer-events:none;max-width:86vw;text-align:center;z-index:99;
+}
+#toast.on{opacity:1;transform:translate(-50%,0)}
+.thr{display:none;background:rgba(255,159,67,.12);border:1px solid rgba(255,159,67,.3);
+  color:var(--warn);font-size:11.5px;padding:8px 12px;border-radius:10px;margin-bottom:10px}
+.thr.on{display:block}
+</style>
+</head>
+<body>
+
+<div class="hd">
+  <span class="dot" id="dot"></span>
+  <h1>K90 Pro Max 调频</h1>
+  <span class="st" id="st">连接中…</span>
+</div>
+
+<div class="thr" id="thr"></div>
+
+<div class="cl p0">
+  <div class="top"><span class="nm">性能核</span><span class="cpus">CPU 0-5</span></div>
+  <div class="val" id="v0">--<small>GHz</small></div>
+  <div class="rng" id="r0">--</div>
+  <div class="bar"><i id="b0"></i><b id="k0"></b></div>
+</div>
+
+<div class="cl p6">
+  <div class="top"><span class="nm">超大核</span><span class="cpus">CPU 6-7</span></div>
+  <div class="val" id="v6">--<small>GHz</small></div>
+  <div class="rng" id="r6">--</div>
+  <div class="bar"><i id="b6"></i><b id="k6"></b></div>
+</div>
+
+<div class="cl gp">
+  <div class="top"><span class="nm">图形处理器</span><span class="cpus" id="glv">GPU</span></div>
+  <div class="val" id="vg">--<small>MHz</small></div>
+  <div class="rng" id="rg">--</div>
+  <div class="bar"><i id="bg"></i><b id="kg"></b></div>
+</div>
+
+<div class="sec">档位</div>
+<div class="grid" id="profiles"></div>
+
+<div class="sec" style="margin-top:20px">
+  <span>自定义频率</span><span class="badge" id="customLive">生效中</span>
+</div>
+<details id="detCustom">
+  <summary>手动调节各集群上下限</summary>
+  <div class="body">
+    <div class="grp">
+      <div class="gh"><em>性能核 0-5</em><span id="h0">--</span></div>
+      <div class="srow"><label>最低</label><select class="p0" id="n0"></select></div>
+      <div class="srow"><label>最高</label><select class="p0" id="m0"></select></div>
+    </div>
+    <div class="grp">
+      <div class="gh"><em>超大核 6-7</em><span id="h6">--</span></div>
+      <div class="srow"><label>最低</label><select class="p6" id="n6"></select></div>
+      <div class="srow"><label>最高</label><select class="p6" id="m6"></select></div>
+    </div>
+    <div class="grp">
+      <div class="gh"><em>GPU 上限</em><span id="hg">--</span></div>
+      <div class="srow"><label>上限</label><select class="gp" id="mg"></select></div>
+    </div>
+    <div class="pend" id="dirty">有未确认的修改, 点「确认应用」才会写进硬件</div>
+    <div class="act2">
+      <button class="btn primary" id="btnApplyCustom" disabled>确认应用</button>
+      <button class="btn" id="btnResetCustom">恢复本档默认</button>
+    </div>
+    <div class="tip">选择后不会立即生效。最低高于最高时会自动把另一端顶过去, 选项严格对齐内核实际支持的频率。</div>
+  </div>
+</details>
+
+<div class="sec">高级</div>
+<details>
+  <summary>守护、温控与备份</summary>
+  <div class="body">
+    <div class="sw">
+      <div>
+        <div class="t">自动维持</div>
+        <div class="s">每 3 秒校正一次, 防止系统把频率改回去</div>
+      </div>
+      <label class="tog"><input type="checkbox" id="watch"><i></i></label>
+    </div>
+    <div class="grp">
+      <div class="gh"><em>温度保护上限</em><span id="hlim">--</span></div>
+      <div class="srow"><label>上限</label><input type="range" id="lim" min="35" max="65" step="1"><span class="num" id="nlim">--</span></div>
+    </div>
+    <button class="btn" id="btnBackup">重新备份当前配置</button>
+    <button class="btn warn" id="btnRestore">恢复出厂默认</button>
+    <div class="tip">
+      达到温度上限后, 模块会让权给系统温控, 不再强行拉频。<br>
+      <b>全拉满测速</b>档 5 分钟后会自动回落到「重度游戏」。
+    </div>
+  </div>
+</details>
+
+<div id="toast"></div>
+
+<script>
+var S=null, timer=null, dragging=false, dirty=false;
+
+function api(q){
+  return fetch("cgi-bin/api.cgi?"+q,{cache:"no-store"}).then(function(r){
+    if(!r.ok) throw new Error("http "+r.status);
+    return r.json();
+  });
+}
+function $(id){return document.getElementById(id);}
+function ghz(k){ return (k/1000000).toFixed(2); }
+function toast(m){
+  var t=$("toast"); t.textContent=m; t.classList.add("on");
+  clearTimeout(t._t); t._t=setTimeout(function(){t.classList.remove("on");},1900);
+}
+
+function render(j){
+  var prev=S?S.profile:null;
+  S=j;
+  // 档位被换掉(点了档位按钮/恢复出厂)时, 丢弃未确认的改动
+  if(prev!==null && prev!==j.profile){ dirty=false; }
+  updateDirty();
+  $("dot").classList.add("on");
+  $("st").textContent="在线";
+  var prof=j.profiles.filter(function(p){return p.k===j.profile;})[0];
+  $("st").textContent = prof ? prof.n : j.profile;
+
+  // 温控提示
+  var thr=$("thr");
+  if(j.throttled==1){ thr.classList.add("on"); thr.textContent="CPU 已达温度上限, 暂时让权给系统温控"; }
+  else thr.classList.remove("on");
+  if(j.profile==="max" && j.maxLeft>0){
+    thr.classList.add("on");
+    thr.textContent="测速档剩余 "+Math.ceil(j.maxLeft/60)+" 分钟, 之后自动回落到重度游戏";
+  }
+
+  setCluster("0", j.p0);
+  setCluster("6", j.p6);
+  setGpu(j.gpu);
+
+  // 档位按钮
+  var box=$("profiles");
+  if(!box._built){
+    box.innerHTML="";
+    j.profiles.forEach(function(p){
+      var b=document.createElement("button");
+      b.className="prof"; b.dataset.k=p.k;
+      b.innerHTML='<span class="n">'+p.n+'</span><span class="d">'+p.d+'</span>';
+      b.onclick=function(){ act("apply&profile="+p.k, "切换中…"); };
+      box.appendChild(b);
+    });
+    box._built=true;
+  }
+  [].forEach.call(box.children,function(b){
+    b.classList.toggle("on", b.dataset.k===j.profile);
+  });
+  $("customLive").classList.toggle("on", j.profile==="custom");
+
+  // 开关与温度
+  if(!dragging){
+    $("watch").checked = j.watch==1;
+    $("lim").value = Math.round(j.limit/1000);
+    $("nlim").textContent = Math.round(j.limit/1000)+" °C";
+    $("hlim").textContent = "高于此温度停止干预";
+  }
+  buildSliders(j);
+}
+
+function setCluster(sfx,c){
+  $("v"+sfx).innerHTML = ghz(c.cur)+'<small>GHz</small>';
+  $("r"+sfx).textContent = ghz(c.min)+" – "+ghz(c.max)+" GHz  ·  "+c.gov;
+  var lo=0, hi=c.avail[c.avail.length-1]-c.avail[0];
+  var pct=(c.max-c.avail[0])/hi*100, cpct=(c.cur-c.avail[0])/hi*100;
+  $("b"+sfx).style.width=Math.max(0,Math.min(100,pct))+"%";
+  $("k"+sfx).style.left=Math.max(0,Math.min(100,cpct))+"%";
+}
+
+function setGpu(g){
+  $("vg").innerHTML = g.curMhz+'<small>MHz</small>';
+  $("rg").textContent = "上限 "+g.maxMhz+" MHz  ·  等级 "+g.level+"  ·  散热限 "+g.thermal;
+  $("glv").textContent = "GPU 0-17";
+  var top=g.freqs[0], bot=g.freqs[g.freqs.length-1];
+  $("bg").style.width = ((g.maxMhz-bot)/(top-bot)*100)+"%";
+  $("kg").style.left = ((g.curMhz-bot)/(top-bot)*100)+"%";
+  if(!$("mg")._built){
+    $("mg")._built=true;
+    var h="",i;
+    for(i=0;i<g.freqs.length;i++) h+='<option value="'+i+'">等级 '+i+' · '+g.freqs[i]+' MHz</option>';
+    $("mg").innerHTML=h;
+    $("mg").onchange=function(){ dirty=isDirty(); updateDirty(); };
+    $("mg").onfocus=function(){ dragging=true; };
+    $("mg").onblur=function(){ setTimeout(function(){dragging=false;},300); };
+  }
+  if(!dragging && !dirty){ $("mg").value=g.level; $("hg").textContent="上限 "+g.maxMhz+" MHz"; }
+}
+
+function setupSelect(sel, avail){
+  if(sel._built) return;
+  sel._built=true;
+  var h="", i;
+  for(i=0;i<avail.length;i++) h+='<option value="'+i+'">'+(avail[i]/1000000).toFixed(2)+' GHz</option>';
+  sel.innerHTML=h;
+  sel.onchange=function(){ onPick(this); };
+  sel.onfocus=function(){ dragging=true; };
+  sel.onblur=function(){ setTimeout(function(){dragging=false;},300); };
+}
+
+function buildSliders(j){
+  var c0=j.p0, c6=j.p6;
+  setupSelect($("n0"),c0.avail); setupSelect($("m0"),c0.avail);
+  setupSelect($("n6"),c6.avail); setupSelect($("m6"),c6.avail);
+  // 用户还没确认的选择不要被 2 秒轮询冲掉
+  if(dragging || dirty) return;
+  $("n0").value=idx(c0.avail,c0.min); $("m0").value=idx(c0.avail,c0.max);
+  $("n6").value=idx(c6.avail,c6.min); $("m6").value=idx(c6.avail,c6.max);
+  $("h0").textContent=ghz(c0.min)+" – "+ghz(c0.max)+" GHz";
+  $("h6").textContent=ghz(c6.min)+" – "+ghz(c6.max)+" GHz";
+}
+function idx(avail,v){ for(var i=avail.length-1;i>=0;i--){ if(avail[i]<=v) return i; } return 0; }
+
+// 下拉框当前选中的频率
+function pick(){
+  var a0=S.p0.avail, a6=S.p6.avail;
+  return {
+    p0min:a0[+$("n0").value], p0max:a0[+$("m0").value],
+    p6min:a6[+$("n6").value], p6max:a6[+$("m6").value],
+    gpu:+$("mg").value
+  };
+}
+
+function isDirty(){
+  if(!S || !$("n0")._built) return false;
+  var v=pick();
+  return !(v.p0min===S.p0.min && v.p0max===S.p0.max &&
+           v.p6min===S.p6.min && v.p6max===S.p6.max &&
+           v.gpu===S.gpu.level);
+}
+
+function updateDirty(){
+  $("dirty").classList.toggle("on", dirty);
+  $("btnApplyCustom").disabled = !dirty;
+}
+
+// 选中下拉框: 只做上下限联动和标记, 不写硬件
+function onPick(src){
+  if(!S) return;
+  var a0=S.p0.avail, a6=S.p6.avail;
+  var n0=$("n0"), m0=$("m0"), n6=$("n6"), m6=$("m6");
+  // 最低高于最高时, 把另一端顶过去(谁被动就动谁)
+  if(+n0.value>+m0.value){ if(src===n0) m0.value=n0.value; else n0.value=m0.value; }
+  if(+n6.value>+m6.value){ if(src===n6) m6.value=n6.value; else n6.value=m6.value; }
+  $("h0").textContent=ghz(a0[+n0.value])+" – "+ghz(a0[+m0.value])+" GHz";
+  $("h6").textContent=ghz(a6[+n6.value])+" – "+ghz(a6[+m6.value])+" GHz";
+  dirty=isDirty();
+  updateDirty();
+}
+
+// 确认应用: 两个集群一次性写入
+function applyCustom(){
+  if(!S || !dirty) return;
+  var v=pick();
+  var q="setall&p0min="+v.p0min+"&p0max="+v.p0max+"&p6min="+v.p6min+"&p6max="+v.p6max;
+  // GPU 没动过就不下发, 免得把系统温控降下来的等级固化成自定义值
+  if(v.gpu!==S.gpu.level) q+="&gpu="+v.gpu;
+  act(q,"写入中…").then(function(){
+    dirty=false; updateDirty(); tick();
+  }).catch(function(){ toast("设置失败"); });
+}
+
+// 恢复本档默认: 重新应用当前档位的预设
+function resetCustom(){
+  if(!S) return;
+  if(S.profile==="custom"){
+    // 自定义档没有预设值, 把下拉框拉回硬件当前生效值
+    dirty=false; updateDirty(); tick(); toast("已回滚到当前生效值");
+    return;
+  }
+  act("apply&profile="+S.profile,"恢复中…").then(function(){
+    dirty=false; updateDirty();
+  }).catch(function(){ toast("恢复失败"); });
+}
+
+function act(q, pending, quiet){
+  if(pending) toast(pending);
+  return api("action="+q).then(function(r){
+    if(!r.ok){ toast(r.msg||"操作失败"); }
+    else if(!quiet && r.msg) toast(r.msg);
+    return tick();
+  });
+}
+
+$("btnApplyCustom").onclick=applyCustom;
+$("btnResetCustom").onclick=resetCustom;
+$("watch").onchange=function(){ act("watch&value="+(this.checked?1:0),"",true); };
+$("lim").oninput=function(){ $("nlim").textContent=this.value+" °C"; };
+$("lim").onchange=function(){ act("temp_limit&value="+(+this.value*1000)); };
+$("btnBackup").onclick=function(){ act("backup"); };
+$("btnRestore").onclick=function(){
+  if(confirm("恢复出厂默认? 会按首次安装时保存的快照还原 CPU/GPU 全部设置。")) act("restore");
+};
+
+function tick(){
+  clearTimeout(timer);
+  return api("action=state").then(function(j){
+    render(j);
+  }).catch(function(){
+    $("dot").classList.remove("on");
+    $("st").textContent="未连接";
+  }).then(function(){
+    if(!document.hidden) timer=setTimeout(tick,2000);
+  });
+}
+
+document.addEventListener("visibilitychange",function(){ if(!document.hidden) tick(); });
+
+// ?open=1 直接展开面板
+if(location.search.indexOf("open")>=0){
+  $("detCustom").open=true;
+  var ds=document.querySelectorAll("details");
+  if(location.search.indexOf("open=all")>=0) [].forEach.call(ds,function(d){d.open=true;});
+}
+tick();
+</script>
+</body>
+</html>
