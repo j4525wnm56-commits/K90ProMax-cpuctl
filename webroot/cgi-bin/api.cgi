@@ -8,6 +8,7 @@ STATE=/data/adb/k90_cpuctl
 CFG=/sys/devices/system/cpu/cpufreq
 P0=$CFG/policy0
 P6=$CFG/policy6
+CPUX=/sys/devices/system/cpu
 GPU=/sys/class/kgsl/kgsl-3d0
 GCDEV=/sys/class/thermal/cooling_device37
 PATH=/system/bin:/system/xbin:/data/adb/ksu/bin:/data/adb/magisk:$PATH
@@ -17,6 +18,12 @@ export PATH
 
 get() { cat "$1" 2>/dev/null; }
 is_num() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+is_mask() {
+    local m="$1"
+    [ ${#m} -eq 8 ] || return 1
+    case "$m" in *[!01]*) return 1 ;; esac
+    return 0
+}
 
 # cooling_device 编号每次启动都可能变(实测 37 一度变成 cdsp_hw), 不能硬编码。
 # 优先读 cpuctl 落下的 $STATE/gpu_cdev 缓存(零 fork), 失效才扫一遍目录。
@@ -115,16 +122,19 @@ do_state() {
         maxleft=$((until - now))
         [ "$maxleft" -lt 0 ] && maxleft=0
     fi
-    # 15 个标量 sysfs 一次读完(原来每个 1 次 fork)
+    # 15 个标量 sysfs 一次读完(原来每个 1 次 fork); 7 个 online 也并进来
     local raw k v p0min=0 p0max=0 p0cur=0 p0gov="" p0av="" p6min=0 p6max=0 p6cur=0 p6gov="" p6av=""
     local glev=0 gmax=0 gcur=0 gth=0 gfr=""
+    local c0=1 c1=1 c2=1 c3=1 c4=1 c5=1 c6=1 c7=1
     raw=$(awk '{printf "%s|%s\n", FILENAME, $0}' \
         "$P0/scaling_min_freq" "$P0/scaling_max_freq" "$P0/scaling_cur_freq" \
         "$P0/scaling_governor" "$P0/scaling_available_frequencies" \
         "$P6/scaling_min_freq" "$P6/scaling_max_freq" "$P6/scaling_cur_freq" \
         "$P6/scaling_governor" "$P6/scaling_available_frequencies" \
         "$GCDEV/cur_state" "$GPU/max_clock_mhz" "$GPU/clock_mhz" \
-        "$GPU/thermal_pwrlevel" "$GPU/freq_table_mhz" 2>/dev/null)
+        "$GPU/thermal_pwrlevel" "$GPU/freq_table_mhz" \
+        "$CPUX/cpu0/online" "$CPUX/cpu1/online" "$CPUX/cpu2/online" "$CPUX/cpu3/online" \
+        "$CPUX/cpu4/online" "$CPUX/cpu5/online" "$CPUX/cpu6/online" "$CPUX/cpu7/online" 2>/dev/null)
     while IFS='|' read -r k v; do
         case "$k" in
             "$P0/scaling_min_freq") p0min=$v ;; "$P0/scaling_max_freq") p0max=$v ;;
@@ -136,6 +146,10 @@ do_state() {
             "$GCDEV/cur_state") glev=$v ;; "$GPU/max_clock_mhz") gmax=$v ;;
             "$GPU/clock_mhz") gcur=$v ;; "$GPU/thermal_pwrlevel") gth=$v ;;
             "$GPU/freq_table_mhz") gfr=$v ;;
+            "$CPUX/cpu0/online") c0=$v ;; "$CPUX/cpu1/online") c1=$v ;;
+            "$CPUX/cpu2/online") c2=$v ;; "$CPUX/cpu3/online") c3=$v ;;
+            "$CPUX/cpu4/online") c4=$v ;; "$CPUX/cpu5/online") c5=$v ;;
+            "$CPUX/cpu6/online") c6=$v ;; "$CPUX/cpu7/online") c7=$v ;;
         esac
     done <<SYSEOF
 $raw
@@ -161,6 +175,7 @@ SYSEOF
         "$p6min" "$p6max" "$p6cur" "$(jstr "$p6gov")" "$(jarr "$p6av")"
     printf '"gpu":{"level":%s,"maxMhz":%s,"curMhz":%s,"thermal":%s,"freqs":%s},' \
         "$glev" "$gmax" "$gcur" "$gth" "$(jarr "$gfr")"
+    printf '"cores":[%s,%s,%s,%s,%s,%s,%s,%s],' "$c0" "$c1" "$c2" "$c3" "$c4" "$c5" "$c6" "$c7"
 
     printf '"profiles":['
     local first=1 k n d a b c e g l
@@ -230,6 +245,33 @@ do_action() {
                 header; printf '{"ok":0,"msg":"GPU 等级 0-17"}'; return 0
             fi
             msg=$(sh "$CP" gpu "$lv" 2>&1)
+            header
+            printf '{"ok":1,"msg":"%s"}' "$(jstr "$msg")"
+            ;;
+        core)
+            local n v
+            n=$(getv cpu); v=$(getv value)
+            if ! is_num "$n" || [ "$n" -gt 7 ]; then
+                header; printf '{"ok":0,"msg":"核心编号 0-7"}'; return 0
+            fi
+            case "$v" in
+                0|1) ;;
+                *) header; printf '{"ok":0,"msg":"参数非法"}'; return 0 ;;
+            esac
+            if [ "$n" = "0" ] && [ "$v" = "0" ]; then
+                header; printf '{"ok":0,"msg":"cpu0 是引导核, 不允许关闭"}'; return 0
+            fi
+            msg=$(sh "$CP" core "$n" "$v" 2>&1)
+            header
+            printf '{"ok":1,"msg":"%s"}' "$(jstr "$msg")"
+            ;;
+        cores)
+            local m
+            m=$(getv mask)
+            if ! is_mask "$m"; then
+                header; printf '{"ok":0,"msg":"掩码必须是 8 位 0/1"}'; return 0
+            fi
+            msg=$(sh "$CP" cores "$m" 2>&1)
             header
             printf '{"ok":1,"msg":"%s"}' "$(jstr "$msg")"
             ;;

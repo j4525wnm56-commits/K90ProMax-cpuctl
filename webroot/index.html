@@ -139,6 +139,25 @@ input[type=range].gp::-webkit-slider-thumb{background:var(--gpu);box-shadow:0 0 
 .tip{font-size:11px;color:var(--dim2);line-height:1.5;margin-top:10px}
 .tip b{color:var(--warn);font-weight:600}
 
+/* 核心开关 */
+.cgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.ccell{
+  background:var(--card2);border:1px solid var(--line);border-radius:10px;
+  padding:9px 4px;font-family:inherit;color:var(--dim2);cursor:pointer;
+  transition:.16s;text-align:center;line-height:1.2;
+}
+.ccell:active:not(:disabled){transform:scale(.95)}
+.ccell .cn{font-size:11.5px;font-weight:640;letter-spacing:.2px;color:var(--dim)}
+.ccell .cs{font-size:10px;margin-top:3px}
+.ccell.on .cn{color:var(--acc)}
+.ccell.p0c.on{border-color:rgba(77,163,255,.42);background:rgba(77,163,255,.1)}
+.ccell.p0c.on .cn,.ccell.p0c.on .cs{color:var(--p0)}
+.ccell.p6c.on{border-color:rgba(176,123,255,.42);background:rgba(176,123,255,.1)}
+.ccell.p6c.on .cn,.ccell.p6c.on .cs{color:var(--p6)}
+.ccell.off .cn{color:var(--dim2)}
+.ccell:disabled{opacity:.6;cursor:not-allowed}
+.ccell:disabled .cs{color:var(--dim2)}
+
 #toast{
   position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 34px);
   transform:translate(-50%,18px);background:#1e2833;color:var(--txt);
@@ -214,6 +233,25 @@ input[type=range].gp::-webkit-slider-thumb{background:var(--gpu);box-shadow:0 0 
   </div>
 </details>
 
+<div class="sec" style="margin-top:20px">
+  <span>核心开关</span><span class="badge" id="coreBadge">已限核</span>
+</div>
+<details id="detCores">
+  <summary>单独开关每个 CPU 核心</summary>
+  <div class="body">
+    <div class="cgrid" id="cgrid"></div>
+    <div class="act2">
+      <button class="btn primary" id="btnCoresAll">全部开启</button>
+      <button class="btn" id="btnCoresBig">关闭超大核</button>
+    </div>
+    <div class="tip">
+      <b>cpu0 是引导核, 模块强制保持开启。</b>这台内核其实允许关掉 cpu0, 但关掉后调度和温控都会出问题, 所以锁死不给动。
+      关核能减少静态漏电, 但剩下的核心要承担同样负载, 频率会被顶得更高, 重载时可能反而更耗电。
+      核心开关由守护进程维持, 切换档位不会改动它。
+    </div>
+  </div>
+</details>
+
 <div class="sec">高级</div>
 <details>
   <summary>守护、温控与备份</summary>
@@ -279,6 +317,7 @@ function render(j){
   setCluster("0", j.p0);
   setCluster("6", j.p6);
   setGpu(j.gpu);
+  renderCores(j.cores);
 
   // 档位按钮
   var box=$("profiles");
@@ -334,6 +373,44 @@ function setGpu(g){
     $("mg").onblur=function(){ setTimeout(function(){dragging=false;},300); };
   }
   if(!dragging && !dirty){ $("mg").value=g.level; $("hg").textContent="上限 "+g.maxMhz+" MHz"; }
+}
+
+// 核心开关: cpu0 无 online 节点, 固定禁用
+function renderCores(arr){
+  var box=$("cgrid");
+  if(!box._built){
+    var i, b;
+    for(i=0;i<8;i++){
+      b=document.createElement("button");
+      b.type="button";
+      b.className="ccell"+(i<6?" p0c":" p6c");
+      b.dataset.n=i;
+      b.innerHTML='<div class="cn">CPU '+i+'</div><div class="cs">--</div>';
+      if(i===0){ b.disabled=true; }
+      b.onclick=function(){
+        if(!S) return;
+        var n=+this.dataset.n;
+        var on=this.classList.contains("on");
+        // 先乐观翻转, 不必等接口回来
+        this.classList.toggle("on",!on);
+        this.classList.toggle("off",on);
+        this.querySelector(".cs").textContent = on?"已关":"在线";
+        act("core&cpu="+n+"&value="+(on?0:1));
+      };
+      box.appendChild(b);
+    }
+    box._built=true;
+  }
+  if(!arr) return;
+  var off=0;
+  [].forEach.call(box.children,function(b){
+    var n=+b.dataset.n, on=arr[n]==1;
+    if(!on) off++;
+    b.classList.toggle("on",on);
+    b.classList.toggle("off",!on);
+    b.querySelector(".cs").textContent = on?"在线":(n===0?"引导核":"已关");
+  });
+  $("coreBadge").classList.toggle("on", off>0);
 }
 
 function setupSelect(sel, avail){
@@ -433,6 +510,8 @@ function act(q, pending, quiet){
 
 $("btnApplyCustom").onclick=applyCustom;
 $("btnResetCustom").onclick=resetCustom;
+$("btnCoresAll").onclick=function(){ act("cores&mask=11111111"); };
+$("btnCoresBig").onclick=function(){ act("cores&mask=11111100"); };
 $("watch").onchange=function(){ act("watch&value="+(this.checked?1:0),"",true); };
 $("lim").oninput=function(){ $("nlim").textContent=this.value+" °C"; };
 $("lim").onchange=function(){ act("temp_limit&value="+(+this.value*1000)); };

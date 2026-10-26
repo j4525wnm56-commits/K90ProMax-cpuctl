@@ -59,7 +59,14 @@ else
     echo 0  > "$GPU/max_pwrlevel" 2>/dev/null
 fi
 
-# 4) 保留备份, 只清运行状态
+# 4) 核心全部恢复上线(限核状态不能留给系统)
+for n in 1 2 3 4 5 6 7; do
+    p=/sys/devices/system/cpu/cpu$n/online
+    [ -e "$p" ] && echo 1 > "$p" 2>/dev/null
+done
+
+# 5) 保留备份, 只清运行状态
 rm -f "$STATE/profile" "$STATE/watch_enabled" "$STATE/web.pid" "$STATE/web_port" \
       "$STATE/custom_p0_min" "$STATE/custom_p0_max" "$STATE/custom_p6_min" "$STATE/custom_p6_max" \
-      "$STATE/gpu_level" "$STATE/web_disabled" "$STATE/throttled" "$STATE/max_until"
+      "$STATE/gpu_level" "$STATE/web_disabled" "$STATE/throttled" "$STATE/max_until" \
+      "$STATE/cores"

@@ -16,6 +16,8 @@ BACKUP=$STATE/backup
 CFG=/sys/devices/system/cpu/cpufreq
 P0=$CFG/policy0
 P6=$CFG/policy6
+CPUX=/sys/devices/system/cpu
+CORES=$STATE/cores
 GPU=/sys/class/kgsl/kgsl-3d0
 # cooling_device 编号在多次启动之间会变(实测 37 一度变成 cdsp_hw, gpu 落到 35),
 # 绝不能硬编码。下面两个变量只是兜底, 真正取值由 resolve_gpu_cdev 按 type 解析。
@@ -191,6 +193,95 @@ gpu_enforce() {
     [ "$(get "$GCDEV/cur_state")" != "$1" ] && echo "$1" > "$GCDEV/cur_state" 2>/dev/null
 }
 
+# ---------------- 核心开关 ----------------
+# 状态文件 $STATE/cores 是 8 位掩码, 第 i 位对应 cpu i。
+# 注意: 这台机器的 cpu0 有 online 节点且可写(实测能关掉), 但关掉 cpu0 会让
+# 调度器/温控出现异常, 所以模块层面强制第 0 位恒为 1, 任何入口都不允许关 cpu0。
+
+valid_mask() {
+    local m="$1"
+    [ ${#m} -eq 8 ] || return 1
+    case "$m" in *[!01]*) return 1 ;; esac
+    return 0
+}
+
+core_mask() {
+    local m
+    m=$(get "$CORES")
+    valid_mask "$m" || m=11111111
+    # 强制 cpu0 为 1
+    m="1${m#?}"
+    echo "$m"
+}
+
+# 逐个读实际在线状态
+core_state() {
+    local n p out=""
+    n=0
+    while [ "$n" -lt 8 ]; do
+        p=$CPUX/cpu$n/online
+        if [ -e "$p" ]; then
+            out="$out$(get "$p")"
+        else
+            out="${out}1"
+        fi
+        n=$((n + 1))
+    done
+    echo "$out"
+}
+
+# 只改第 n 位, 其余位保持; 第 0 位恒为 1
+core_save() {
+    local n=$1 v=$2 m i out=""
+    m=$(core_mask)
+    i=0
+    while [ "$i" -lt 8 ]; do
+        if [ "$i" = "$n" ]; then
+            out="$out$v"
+        else
+            out="$out${m:$i:1}"
+        fi
+        i=$((i + 1))
+    done
+    echo "1${out#?}" > "$CORES"
+}
+
+# 只写硬件并回读校验, 不动状态文件
+# 上线/下线有延迟(尤其 cpu0-5), 立即回读会失败, 所以重试几次再判定
+# 返回 0 成功 / 1 内核拒绝 / 2 无 online 节点
+core_set() {
+    local n=$1 v=$2 p i=0
+    p=$CPUX/cpu$n/online
+    [ -e "$p" ] || return 2
+    while [ "$i" -lt 4 ]; do
+        echo "$v" > "$p" 2>/dev/null
+        [ "$(get "$p")" = "$v" ] && return 0
+        sleep 0.15 2>/dev/null || sleep 1
+        i=$((i + 1))
+    done
+    [ "$(get "$p")" = "$v" ] && return 0
+    return 1
+}
+
+# 批量维持: 一次 awk 读 8 个 online 文件, 只在偏离目标时写
+# cpu0 无论掩码如何都强制为 1
+core_enforce() {
+    local m line p v n want
+    m=$(core_mask)
+    line=$(awk '{printf "%s|%s\n", FILENAME, $1}' \
+        $CPUX/cpu0/online $CPUX/cpu1/online $CPUX/cpu2/online $CPUX/cpu3/online \
+        $CPUX/cpu4/online $CPUX/cpu5/online $CPUX/cpu6/online $CPUX/cpu7/online 2>/dev/null)
+    while IFS='|' read -r p v; do
+        n=${p#/sys/devices/system/cpu/cpu}
+        n=${n%/online}
+        is_num "$n" || continue
+        if [ "$n" = "0" ]; then want=1; else want=${m:$n:1}; fi
+        [ "$want" = "$v" ] || echo "$want" > "$p" 2>/dev/null
+    done <<EOF
+$line
+EOF
+}
+
 # ---------------- 备份 / 还原 ----------------
 cmd_backup() {
     mkdir -p "$BACKUP"
@@ -214,13 +305,14 @@ cmd_backup() {
         echo "cdev_kgsl=$(get "$GCDEV2/cur_state")"
         echo "msm_cpu_max=$(get "$MSM/cpu_max_freq")"
         echo "cpufreq_boost=$(get "$CFG/boost")"
+        echo "cores=$(core_state)"
     } > "$f"
     echo "已备份到 $f"
     cat "$f"
 }
 
 restore_stock_values() {
-    local f="$BACKUP/stock.conf" k v
+    local f="$BACKUP/stock.conf" k v wc=""
     if [ -f "$f" ]; then
         while IFS='=' read -r k v; do
             [ -z "$k" ] && continue
@@ -241,6 +333,7 @@ restore_stock_values() {
                 cdev37)    [ -n "$v" ] && echo "$v" > "$GCDEV/cur_state" 2>/dev/null ;;
                 cdev35)    [ -n "$v" ] && echo "$v" > "$GCDEV2/cur_state" 2>/dev/null ;;
                 msm_cpu_max) [ -n "$v" ] && echo "$v" > "$MSM/cpu_max_freq" 2>/dev/null ;;
+                cores)   wc="$v" ;;
             esac
         done < "$f"
     else
@@ -253,6 +346,10 @@ restore_stock_values() {
         echo 17 > "$GPU/min_pwrlevel" 2>/dev/null
         echo 0  > "$GPU/max_pwrlevel" 2>/dev/null
     fi
+    # 出厂状态核心全开; 快照里记过就按快照还原
+    valid_mask "$wc" || wc=11111111
+    echo "$wc" > "$CORES"
+    core_enforce
 }
 
 # ---------------- 档位 ----------------
@@ -410,6 +507,59 @@ cmd_gpu() {
 
 cmd_temp() { echo "CPU=$(cpu_temp) GPU=$(gpu_temp) 电池=$(batt_temp)"; }
 
+# ---------------- 限核 ----------------
+cmd_core() {
+    local n="$1" v="$2" rc
+    case "$v" in
+        on|1)  v=1 ;;
+        off|0) v=0 ;;
+        *)     echo "用法: cpuctl core <0-7> <on|off>"; return 1 ;;
+    esac
+    is_num "$n" || { echo "核心编号 0-7"; return 1; }
+    [ "$n" -le 7 ] || { echo "核心编号 0-7"; return 1; }
+    if [ "$n" = "0" ] && [ "$v" = "0" ]; then
+        echo "cpu0 是引导核, 不允许关闭"
+        return 1
+    fi
+    core_set "$n" "$v"
+    rc=$?
+    if [ "$rc" = "2" ]; then
+        echo "cpu$n 没有 online 节点, 内核不允许单独关闭(引导核)"
+        return 1
+    fi
+    if [ "$rc" != "0" ]; then
+        echo "cpu$n 切换失败: 内核拒绝(可能不允许关掉该簇最后一个核心)"
+        return 1
+    fi
+    core_save "$n" "$v"
+    if [ "$v" = "1" ]; then
+        echo "cpu$n 已开启"
+    else
+        echo "cpu$n 已关闭"
+    fi
+}
+
+cmd_cores() {
+    local arg="$1" m
+    if [ -z "$arg" ]; then
+        echo "实际在线: $(core_state)   (按 cpu0-7 排列)"
+        echo "目标状态: $(core_mask)"
+        return 0
+    fi
+    case "$arg" in
+        all|reset) m=11111111 ;;
+        *)         valid_mask "$arg" || { echo "用法: cpuctl cores [all|8位掩码]  如 11111100"; return 1; }
+                   m="$arg" ;;
+    esac
+    case "$m" in
+        0*) echo "注: cpu0 是引导核, 已强制保持开启"
+            m="1${m#?}" ;;
+    esac
+    echo "$m" > "$CORES"
+    core_enforce
+    echo "目标 $m, 实际 $(core_state)"
+}
+
 # ---------------- 守护 ----------------
 cmd_watch_on() {
     echo 1 > "$STATE/watch_enabled"
@@ -488,6 +638,8 @@ cmd___watch() {
                 [ -n "$(get "$STATE/gpu_level")" ] && gpu_enforce "$(get "$STATE/gpu_level")"
             fi
         fi
+        # 限核状态独立于档位, 不随温度让权
+        core_enforce
         # WebUI 自愈
         if [ ! -f "$STATE/web_disabled" ] && ! web_alive 2>/dev/null; then
             sh "$MODDIR/bin/web_spawn.sh" "$(web_port)" >/dev/null 2>&1
@@ -568,7 +720,7 @@ cmd_web_open() {
 
 # ---------------- 状态 ----------------
 cmd_status() {
-    local prof p
+    local prof p cs wm on i
     prof=$(get "$STATE/profile")
     [ -z "$prof" ] && prof=stock
     echo "档位    : $prof"
@@ -576,6 +728,16 @@ cmd_status() {
     echo "CPU 6-7 : $(get "$P6/scaling_min_freq") - $(get "$P6/scaling_max_freq") kHz  now $(get "$P6/scaling_cur_freq")  [$(get "$P6/scaling_governor")]"
     echo "GPU     : 等级 $(get "$GCDEV/cur_state") 上限 $(get "$GPU/max_clock_mhz")MHz  now $(get "$GPU/clock_mhz")MHz"
     echo "GPU设备 : $GCDEV (type=$(get "$GCDEV/type") max=$(get "$GCDEV/max_state"))"
+    cs=$(core_state); wm=$(core_mask); on=0; i=0
+    while [ "$i" -lt 8 ]; do
+        [ "${cs:$i:1}" = "1" ] && on=$((on + 1))
+        i=$((i + 1))
+    done
+    if [ "$cs" = "$wm" ]; then
+        echo "核心    : $cs  在线 $on/8"
+    else
+        echo "核心    : $cs  在线 $on/8  目标 $wm"
+    fi
     echo "温度    : CPU $(cpu_temp)  GPU $(gpu_temp)  电池 $(batt_temp)"
     cmd_watch_status
     local lim; lim=$(get "$STATE/temp_limit"); is_num "$lim" || lim=48000
@@ -610,6 +772,7 @@ cmd_boot() {
     fi
     local gl; gl=$(get "$STATE/gpu_level")
     is_num "$gl" && gpu_set_level "$gl"
+    core_enforce
     if [ "$(get "$STATE/watch_enabled")" = "1" ]; then
         sh "$MODDIR/bin/watch_run.sh" >/dev/null 2>&1
     fi
@@ -626,6 +789,8 @@ case "$1" in
     set)         cmd_set "$2" "$3" "$4" ;;
     setall)      cmd_setall "$2" "$3" "$4" "$5" "$6" ;;
     gpu)         cmd_gpu "$2" ;;
+    core)        cmd_core "$2" "$3" ;;
+    cores)       cmd_cores "$2" ;;
     temp)        cmd_temp ;;
     backup)      cmd_backup ;;
     restore)     cmd_apply stock ;;
@@ -655,6 +820,8 @@ case "$1" in
         echo "  cpuctl set <p0|p6> <min> <max>   自定义单集群(kHz)"
         echo "  cpuctl setall <p0min> <p0max> <p6min> <p6max> [gpu等级]  双集群一起写"
         echo "  cpuctl gpu <0-17|MHz>            设置 GPU 功耗等级"
+        echo "  cpuctl core <0-7> <on|off>       开关单个 CPU 核心"
+        echo "  cpuctl cores [all|8位掩码]       批量限核 (如 11111100 = 关超大核)"
         echo "  cpuctl watch <on|off|status>     自动维持"
         echo "  cpuctl temp                      读取温度"
         echo "  cpuctl backup                    重新备份当前配置"

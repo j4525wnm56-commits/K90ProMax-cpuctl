@@ -25,11 +25,12 @@ Redmi K90 Pro Max 的 **CPU + GPU** 频率档位管理模块。
 - **9 个档位**：出厂默认 / 最低频率 / 极致省电 / 日常省电 / 日常均衡 / 日常增强 / 轻度游戏 / 重度游戏 / 全拉满测速
 - **GPU 联动**：每个档位同时设 CPU 与 GPU 功耗等级（按 `type=gpu` 动态定位冷却设备，18 档 160–1200 MHz）
 - **自定义频率**：下拉选择框 + `确认应用`。选完不生效，点确认才一次性原子写入两簇与 GPU；`恢复本档默认` 一键回到预设
+- **逐核心开关（限核）**：界面 8 个开关或 `cpuctl core <n> on|off` 单独开关任意核心，守护进程每轮维持；`cpu0` 强制常开（内核其实允许关，但关掉会让调度和温控出错）
 - **自动维持守护**：每 10 秒校正一次（`CPUCTL_INTERVAL` 可调），被系统偷偷改回来会拉回去；测速档 5 分钟自动回落到重度游戏
 - **温度保护**：CPU 温度达到上限（默认 48 °C）时让权给系统温控
 - **配置备份/还原**：抓取出厂 sysfs 快照，界面按钮、命令行、卸载三个入口都能还原
 - **纯 sysfs + KGSL**：只读写 `/sys`，不注入进程、不 hook 内核
-- **低开销**：单次状态请求 ~1.4 s（优化前 4 s），前端轮询在页面闲置时自动降频到 6 s / 15 s
+- **低开销**：单次状态请求 ~1.1 s（优化前 4 s），前端轮询在页面闲置时自动降频到 6 s / 15 s
 
 ---
 
@@ -49,21 +50,21 @@ Redmi K90 Pro Max 的 **CPU + GPU** 频率档位管理模块。
 
 **方式一：管理器刷入**
 
-下载 Release 里的 `K90ProMax-cpuctl-v1.3.1.zip`，在 KernelSU / Magisk 的「模块 → 从本地安装」中选它。
+下载 Release 里的 `K90ProMax-cpuctl-v1.4.0.zip`，在 KernelSU / Magisk 的「模块 → 从本地安装」中选它。
 
 **方式二：命令行**
 
 ```bash
-adb push K90ProMax-cpuctl-v1.3.1.zip /data/local/tmp/
-su -c 'magisk --install-module /data/local/tmp/K90ProMax-cpuctl-v1.3.1.zip'
+adb push K90ProMax-cpuctl-v1.4.0.zip /data/local/tmp/
+su -c 'magisk --install-module /data/local/tmp/K90ProMax-cpuctl-v1.4.0.zip'
 ```
 
 **方式三：不重启立即用（临时 root 场景）**
 
 ```bash
-adb push K90ProMax-cpuctl-v1.3.1.zip /data/local/tmp/
+adb push K90ProMax-cpuctl-v1.4.0.zip /data/local/tmp/
 su -c 'M=/data/adb/modules/k90_cpuctl; rm -rf $M; mkdir -p $M; \
-       busybox unzip -o /data/local/tmp/K90ProMax-cpuctl-v1.3.1.zip -d $M >/dev/null; \
+       busybox unzip -o /data/local/tmp/K90ProMax-cpuctl-v1.4.0.zip -d $M >/dev/null; \
        chmod 755 $M/bin/* $M/service.sh $M/action.sh $M/uninstall.sh \
                  $M/webroot/cgi-bin/api.cgi'
 su -c '/data/adb/modules/k90_cpuctl/bin/cpuctl boot'
@@ -89,6 +90,30 @@ su -c '/data/adb/modules/k90_cpuctl/bin/cpuctl boot'
 
 > `floor` 是 min=max 硬锁，实测守护可长期维持，但切换动画、滑动会有肉眼可见延迟，属于挂机/应急档而非日常档。
 > `max` 只适合跑分，持续用发热明显。
+
+---
+
+## 限核（逐核心开关）
+
+限核是独立于档位的第二个维度：切换档位不会改动核心开关，核心开关也不会改动频率档位。
+
+```bash
+su -c "sh $C core 7 off"        # 关单个核心
+su -c "sh $C core 7 on"         # 开回来
+su -c "sh $C cores"             # 看实际在线状态与目标状态
+su -c "sh $C cores 11111100"    # 8 位掩码，第 i 位对应 cpu i；这里关掉 cpu6-7
+su -c "sh $C cores all"         # 全部开启
+```
+
+状态存在 `/data/adb/k90_cpuctl/cores`（8 位掩码），守护进程每轮读一次 8 个 `online` 文件（一次 `awk`，不额外 fork），只在偏离目标时才写。
+
+**关于 `cpu0`**：这台机器的 `cpu0` **有** `online` 节点，实测 `echo 0 > /sys/devices/system/cpu/cpu0/online` 能成功。但关掉之后调度和温控会异常，所以模块在四个层面都锁死了它——`cmd_core` 拒绝、`cmd_cores` 掩码自动纠正、`core_save` 强制第 0 位为 1、`core_enforce` 无条件写 1。界面上对应按钮是禁用的。
+
+**实测行为**：
+
+- 关掉 `cpu6`/`cpu7` 后，`core_ctl`（`enable=1`、`min_cpus=0`）在满载下也**不会**把它们拉回来
+- 手动 `echo 1 > cpu7/online` 后，守护进程 5 秒内纠正回 0
+- 关核的代价：剩余核心承担同样负载，频率会被顶得更高。重载场景可能反而更耗电，所以适合静态低档位，不适合做动态策略
 
 ---
 
@@ -148,6 +173,8 @@ su -c "sh $C apply heavy"                               # 切档
 su -c "sh $C set p0 384000 1900800"                     # 自定义单集群（kHz）
 su -c "sh $C setall 691200 1785600 883200 1862400 10"   # 两簇 + GPU 一次写入
 su -c "sh $C gpu 3"                                     # GPU 等级 0-17（也可写 902 这样的 MHz）
+su -c "sh $C core 7 off"                                # 开关单个核心
+su -c "sh $C cores 11111100"                            # 批量限核（8 位掩码）
 su -c "sh $C watch on|off|status"                       # 自动维持
 su -c "sh $C temp"                                      # 温度
 su -c "sh $C backup"                                    # 重新备份
@@ -200,13 +227,13 @@ su -c "sh $C boot"                                      # 手动跑一次开机�
 
 调频模块本身必须是「零感知」的，否则压频率省下来的电会被守护进程自己吃掉。这台机器上一个 `fork` 在内存紧张时要 20 ms，所以脚本里的每次 `$(cat ...)` 都很贵。
 
-| 项 | v1.2 | v1.3 |
-|---|---|---|
-| 单次 `action=state` | 4.0 s | **1.4 s** |
-| 每请求 fork 次数 | 200+ | ~20 |
-| 守护校正间隔 | 3 s | 10 s |
-| 前端轮询（闲置） | 固定 2 s | 2 s → 6 s → 15 s 自适应 |
-| 页面切到后台 | 继续轮询 | 停止 |
+| 项 | v1.2 | v1.3 | v1.4 |
+|---|---|---|---|
+| 单次 `action=state` | 4.0 s | 1.4 s | **1.1 s** |
+| 每请求 fork 次数 | 200+ | ~20 | ~20（限核状态并入同一次 awk） |
+| 守护校正间隔 | 3 s | 10 s | 10 s |
+| 前端轮询（闲置） | 固定 2 s | 2 s → 6 s → 15 s 自适应 | 同左 |
+| 页面切到后台 | 继续轮询 | 停止 | 停止 |
 
 三条原则，改代码时请守住：
 
@@ -224,11 +251,13 @@ su -c "sh $C boot"                                      # 手动跑一次开机�
 
 | action | 参数 | 说明 |
 |---|---|---|
-| `state` | — | 档位、温度、守护状态、两簇与 GPU 详情、档位表 |
+| `state` | — | 档位、温度、守护状态、两簇与 GPU 详情、8 核在线状态 `cores`、档位表 |
 | `apply` | `profile=<键>` | 切档，键来自 `profiles.sh` |
 | `set` | `cluster=p0\|p6`、`min`、`max` | 自定义单簇 |
 | `setall` | `p0min`、`p0max`、`p6min`、`p6max`、`gpu`(可选) | 原子写入多目标 |
 | `gpu` | `level=0..17` | GPU 功耗等级 |
+| `core` | `cpu=0..7`、`value=0\|1` | 开关单个核心（`cpu=0` 且 `value=0` 会被拒绝） |
+| `cores` | `mask=8位0/1` | 批量限核，第 i 位对应 cpu i |
 | `watch` | `value=0\|1` | 开关守护 |
 | `temp_limit` | `value=35000..65000` | 温度上限（毫摄氏度） |
 | `restore` | — | 恢复出厂快照 |
