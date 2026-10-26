@@ -28,9 +28,10 @@ Redmi K90 Pro Max 的 **CPU + GPU** 频率档位管理模块。
 - **逐核心开关（限核）**：界面 8 个开关或 `cpuctl core <n> on|off` 单独开关任意核心，守护进程每轮维持；`cpu0` 强制常开（内核其实允许关，但关掉会让调度和温控出错）
 - **自动维持守护**：每 10 秒校正一次（`CPUCTL_INTERVAL` 可调），被系统偷偷改回来会拉回去；测速档 5 分钟自动回落到重度游戏
 - **温度保护**：CPU 温度达到上限（默认 48 °C）时让权给系统温控
+- **实时功耗**：读 `current_now` / `voltage_now` 现算功率，界面显示 W + 电压电流，并用 `status` 区分充电中 / 放电中（内核惯例：负电流=充电）
 - **配置备份/还原**：抓取出厂 sysfs 快照，界面按钮、命令行、卸载三个入口都能还原
 - **纯 sysfs + KGSL**：只读写 `/sys`，不注入进程、不 hook 内核
-- **低开销**：单次状态请求 ~1.1 s（优化前 4 s），前端轮询在页面闲置时自动降频到 6 s / 15 s
+- **低开销**：单次状态请求 295 ms（v1.4 为 1.37 s，最初 4 s），前端轮询在页面闲置时自动降频到 6 s / 15 s
 
 ---
 
@@ -177,6 +178,7 @@ su -c "sh $C core 7 off"                                # 开关单个核心
 su -c "sh $C cores 11111100"                            # 批量限核（8 位掩码）
 su -c "sh $C watch on|off|status"                       # 自动维持
 su -c "sh $C temp"                                      # 温度
+su -c "sh $C power"                                     # 实时功耗
 su -c "sh $C backup"                                    # 重新备份
 su -c "sh $C restore"                                   # 恢复出厂
 su -c "sh $C web start|stop|restart|status|open"
@@ -219,7 +221,7 @@ su -c "sh $C boot"                                      # 手动跑一次开机�
 
 前端按钮、`cpuctl list`、CGI 白名单都从这张表动态生成——**加档位只改这一个文件**。
 
-运行时状态在 `/data/adb/k90_cpuctl/`：`profile`、`watch_enabled`、`web_port`、`temp_limit`、`backup/stock.conf`，`gpu_cdev`（解析出的 GPU 冷却设备路径），以及温度 zone 缓存 `tz_cpu.list` / `tz_batt.list`（删掉都会自动重建）。
+运行时状态在 `/data/adb/k90_cpuctl/`：`profile`、`watch_enabled`、`web_port`、`temp_limit`、`backup/stock.conf`，`gpu_cdev`（解析出的 GPU 冷却设备路径），温度 zone 缓存 `tz_cpu.list` / `tz_batt.list`，以及档位表缓存 `profiles.json`（删掉都会自动重建）。
 
 ---
 
@@ -227,13 +229,27 @@ su -c "sh $C boot"                                      # 手动跑一次开机�
 
 调频模块本身必须是「零感知」的，否则压频率省下来的电会被守护进程自己吃掉。这台机器上一个 `fork` 在内存紧张时要 20 ms，所以脚本里的每次 `$(cat ...)` 都很贵。
 
-| 项 | v1.2 | v1.3 | v1.4 |
-|---|---|---|---|
-| 单次 `action=state` | 4.0 s | 1.4 s | **1.1 s** |
-| 每请求 fork 次数 | 200+ | ~20 | ~20（限核状态并入同一次 awk） |
-| 守护校正间隔 | 3 s | 10 s | 10 s |
-| 前端轮询（闲置） | 固定 2 s | 2 s → 6 s → 15 s 自适应 | 同左 |
-| 页面切到后台 | 继续轮询 | 停止 | 停止 |
+| 项 | v1.2 | v1.3 | v1.4 | v1.5 |
+|---|---|---|---|---|
+| 单次 `action=state` | 4.0 s | 1.4 s | 1.1 s | **295 ms** |
+| 每请求 fork 次数 | 200+ | ~20 | ~20 | **2** |
+| 守护校正间隔 | 3 s | 10 s | 10 s | 10 s |
+| 前端轮询（闲置） | 固定 2 s | 2 s → 6 s → 15 s 自适应 | 同左 | 同左 |
+| 页面切到后台 | 继续轮询 | 停止 | 停止 | 停止 |
+
+### v1.5 做了什么
+
+单次 fork 实测 25–30 ms（`date +%s` 单独一次就是 29 ms），所以这一版把「减少 fork 次数」做到底：
+
+| 改动 | 省下的 fork |
+|---|---|
+| 温度（16 个 zone）、GPU 温度、电池电流/电压/状态全并入主 `awk` | 5 |
+| 6 个状态文件改用 shell 内建 `read < file`，不再 `$(cat ...)` | 6 |
+| 档位表 JSON 缓存到 `$STATE/profiles.json`，命中时 `read` 读一行 | 2 |
+| `$(jstr ...)` 改成赋值风格（`jesc` / `jarrv` 写 `$JSTR` / `$JARR`） | 36 |
+| `date +%s` 换成 `awk` 的 `systime()` | 1 |
+
+档位缓存用 `[ profiles.sh -nt profiles.json ]` 判断失效，模块升级时 `customize.sh` 会主动删掉它。
 
 三条原则，改代码时请守住：
 
@@ -251,7 +267,7 @@ su -c "sh $C boot"                                      # 手动跑一次开机�
 
 | action | 参数 | 说明 |
 |---|---|---|
-| `state` | — | 档位、温度、守护状态、两簇与 GPU 详情、8 核在线状态 `cores`、档位表 |
+| `state` | — | 档位、温度、实时功耗 `power`、守护状态、两簇与 GPU 详情、8 核在线状态 `cores`、档位表 |
 | `apply` | `profile=<键>` | 切档，键来自 `profiles.sh` |
 | `set` | `cluster=p0\|p6`、`min`、`max` | 自定义单簇 |
 | `setall` | `p0min`、`p0max`、`p6min`、`p6max`、`gpu`(可选) | 原子写入多目标 |
@@ -316,6 +332,9 @@ su -c "sh /data/adb/modules/k90_cpuctl/bin/cpuctl restore"   # 命令行
 | 待机也耗电、内核态跑满一个核 | **内存耗尽（15 G 只剩 142 MB，swap 8.7 G）时 fork 从 2 ms 涨到 20 ms**；CGI 单请求 fork 上百次 → 一次 `state` 要 4 s，而前端每 2 s 轮询一次，请求无限堆积 | `api.cgi` 合并 sysfs 读取、缓存 thermal zone 列表、`jstr` 改纯 shell 替换；前端轮询自适应 |
 | CGI 特别慢 | `cpu_temp()` 遍历 96 个 `thermal_zone`，每个读 `type`+`temp` 两次 = 192 次 fork | 首次运行缓存 zone 路径到 `$STATE/tz_*.list`，之后一次 `awk` 读完 |
 | 一条 `printf` 发 30 个参数 | 每个 `$(get ...)` 都是一次 fork | 一次 `awk` 批量读 15 个标量，`while IFS='\|' read` 分发到变量 |
+| `awk` 里路径正则全部不命中，温度静默变 0 | **busybox awk 的正则字面量 `/.../` 遇到 `/` 会提前终止**，写 `\/` 不生效，写 `[/]` 直接报 `nonterminated character class` | 路径一律用字符串正则：`FILENAME ~ "thermal_zone[0-9]+/temp$"` |
+| 同上，但正则明明能命中 | 温度列表 `tz_cpu.list` 存的是 **zone 目录**，传给 awk 前忘了补 `/temp`；awk 打开目录不报错，规则自然一个都不匹配 | 拼接时写 `$p/temp`；调试时打印 `FILENAME in 数组` 的命中数 |
+| 纯 shell 函数仍然很慢 | `$(jstr "$x")` 的函数体虽然零 fork，但**命令替换本身要 fork 子 shell** | 改成赋值风格（`jesc` 写 `$JSTR`），直接引用变量 |
 
 ---
 

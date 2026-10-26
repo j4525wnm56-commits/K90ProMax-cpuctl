@@ -10,6 +10,7 @@ P0=$CFG/policy0
 P6=$CFG/policy6
 CPUX=/sys/devices/system/cpu
 GPU=/sys/class/kgsl/kgsl-3d0
+BATT=/sys/class/power_supply/battery
 GCDEV=/sys/class/thermal/cooling_device37
 PATH=/system/bin:/system/xbin:/data/adb/ksu/bin:/data/adb/magisk:$PATH
 export PATH
@@ -71,6 +72,22 @@ jstr() {
     printf '%s' "$s"
 }
 
+# 同上但结果落在 $JSTR / $JARR, 供 printf 直接引用。
+# 关键: 写成 $(jstr ...) 时命令替换必然 fork 一个子 shell, 单价 25ms 级;
+# 老代码在 profiles 循环里调了 36 次, 单这一项就吃掉近 1 秒。改成赋值形式, 零 fork。
+jesc() {
+    JSTR=${1//\\/\\\\}
+    JSTR=${JSTR//\"/\\\"}
+}
+jarrv() {
+    local out="" x
+    for x in $1; do
+        is_num "$x" || continue
+        if [ -z "$out" ]; then out="$x"; else out="$out,$x"; fi
+    done
+    JARR="[$out]"
+}
+
 header() {
     printf 'Content-Type: application/json; charset=utf-8\r\n'
     printf 'Cache-Control: no-store\r\n'
@@ -84,12 +101,13 @@ TZC="$STATE/tz_cpu.list"; TZB="$STATE/tz_batt.list"
 
 build_tz() {
     : > "$TZC"; : > "$TZB"
-    local z t
-    for z in /sys/class/thermal/thermal_zone*; do
-        t=$(get "$z/type")
+    # 96 个 zone 原来逐个 $(cat type) 是 96 次 fork(首次请求要 2 秒多);
+    # 让 awk 一次读完所有 type 再分类, 只剩 1 次 fork
+    awk '{print FILENAME "|" $0}' /sys/class/thermal/thermal_zone*/type 2>/dev/null |
+    while IFS='|' read -r f t; do
         case "$t" in
-            cpu-[01]-*)         echo "$z" >> "$TZC" ;;
-            battery|batt_therm) echo "$z" >> "$TZB" ;;
+            cpu-[01]-*)         echo "${f%/type}" >> "$TZC" ;;
+            battery|batt_therm) echo "${f%/type}" >> "$TZB" ;;
         esac
     done
 }
@@ -109,83 +127,144 @@ batt_temp() {
 }
 
 do_state() {
-    local prof watch lim thr t gt bt maxleft until now msec
-    prof=$(get "$STATE/profile"); [ -z "$prof" ] && prof=stock
-    watch=$(get "$STATE/watch_enabled"); [ -z "$watch" ] && watch=0
-    lim=$(get "$STATE/temp_limit"); is_num "$lim" || lim=48000
-    thr=$(get "$STATE/throttled"); is_num "$thr" || thr=0
-    msec=$(get "$STATE/max_seconds"); is_num "$msec" || msec=300
+    local prof watch lim thr maxleft until now=0 msec
+    # 状态文件都是 /data 下的普通文件, 用 shell 内建 read 直读:
+    # 原来 6 次 $(cat) 就是 6 次 fork, 按 25ms 单价约 150ms
+    prof="";   [ -f "$STATE/profile" ] && read -r prof < "$STATE/profile"; [ -z "$prof" ] && prof=stock
+    watch=0;   [ -f "$STATE/watch_enabled" ] && read -r watch < "$STATE/watch_enabled"
+    lim=48000; [ -f "$STATE/temp_limit" ] && read -r lim < "$STATE/temp_limit"
+    thr=0;     [ -f "$STATE/throttled" ] && read -r thr < "$STATE/throttled"
+    msec=300;  [ -f "$STATE/max_seconds" ] && read -r msec < "$STATE/max_seconds"
+    until="";  [ -f "$STATE/max_until" ] && read -r until < "$STATE/max_until"
+    is_num "$lim"  || lim=48000
+    is_num "$thr"  || thr=0
+    is_num "$msec" || msec=300
     maxleft=0
-    until=$(get "$STATE/max_until")
-    if is_num "$until"; then
-        now=$(date +%s)
-        maxleft=$((until - now))
-        [ "$maxleft" -lt 0 ] && maxleft=0
-    fi
-    # 15 个标量 sysfs 一次读完(原来每个 1 次 fork); 7 个 online 也并进来
-    local raw k v p0min=0 p0max=0 p0cur=0 p0gov="" p0av="" p6min=0 p6max=0 p6cur=0 p6gov="" p6av=""
+    # maxLeft 留到拿到 awk 的 systime() 之后再算, 省掉一次 date fork(实测 29ms)
+    # 一次 awk 读完所有 sysfs: 24 个标量 + 18 个温度 + 3 个电源, 顺带算好功耗和时间戳。
+    # 原来这里是 1 次 awk + 2×(sed+awk) + 3 次 cat + 1 次 date ≈ 9 次 fork;
+    # fork 单价实测 25-30ms, 合并后只剩 1 次。
+    local raw k f1 f2 f3 f4 f5 f6 f7
+    local p0min=0 p0max=0 p0cur=0 p0gov="" p0av="" p6min=0 p6max=0 p6cur=0 p6gov="" p6av=""
     local glev=0 gmax=0 gcur=0 gth=0 gfr=""
     local c0=1 c1=1 c2=1 c3=1 c4=1 c5=1 c6=1 c7=1
-    raw=$(awk '{printf "%s|%s\n", FILENAME, $0}' \
+    local t=0 gt=0 bt=0 pmw=0 pma=0 pmv=0 pst=""
+    local cpup="" batp=""
+    [ -s "$TZC" ] || build_tz
+    # 缓存列表存的是 zone 目录, 这里补上 /temp —— 漏了这一步 awk 拿到的是目录,
+    # 不会报错也不会命中任何规则, 温度会静默变成 0
+    while read -r p; do [ -n "$p" ] && cpup="$cpup $p/temp"; done < "$TZC" 2>/dev/null
+    while read -r p; do [ -n "$p" ] && batp="$batp $p/temp"; done < "$TZB" 2>/dev/null
+    raw=$(awk -v zc="$TZC" -v zb="$TZB" '
+        FILENAME==zc { if (NF) cput[$0 "/temp"]=1; next }
+        FILENAME==zb { if (NF) btt[$0 "/temp"]=1; next }
+        # 注意: busybox awk 的正则字面量 /.../ 遇到 / 会提前终止(连 [/] 都不行),
+        # 所以路径一律用字符串正则匹配, 别写成 /xxx\/temp$/
+        FILENAME ~ "kgsl-3d0/temp$" { gt=$1+0; next }
+        FILENAME ~ "thermal_zone[0-9]+/temp$" {
+            v=$1+0
+            if (FILENAME in cput) { if (v>mc) mc=v }
+            else if ((FILENAME in btt) && !bs && v>0) { mb=v; bs=1 }
+            next
+        }
+        FILENAME ~ "power_supply/battery/current_now$" { I=$1+0; next }
+        FILENAME ~ "power_supply/battery/voltage_now$" { V=$1+0; next }
+        FILENAME ~ "power_supply/battery/status$"      { ST=$1; next }
+        { print FILENAME "|" $0 }
+        END {
+            # 放电为正, 充电为负(内核惯例), 功率取绝对值, 方向交给 status 判断
+            mw=(V*I)/1000000000; if (mw<0) mw=-mw
+            printf "@sum|%d|%d|%d|%d|%d|%d|%s\n", mc, gt, mb, mw, I, V, ST
+            printf "@time|%d\n", systime()
+        }
+    ' "$TZC" "$TZB" $cpup $batp \
         "$P0/scaling_min_freq" "$P0/scaling_max_freq" "$P0/scaling_cur_freq" \
         "$P0/scaling_governor" "$P0/scaling_available_frequencies" \
         "$P6/scaling_min_freq" "$P6/scaling_max_freq" "$P6/scaling_cur_freq" \
         "$P6/scaling_governor" "$P6/scaling_available_frequencies" \
         "$GCDEV/cur_state" "$GPU/max_clock_mhz" "$GPU/clock_mhz" \
-        "$GPU/thermal_pwrlevel" "$GPU/freq_table_mhz" \
+        "$GPU/thermal_pwrlevel" "$GPU/freq_table_mhz" "$GPU/temp" \
         "$CPUX/cpu0/online" "$CPUX/cpu1/online" "$CPUX/cpu2/online" "$CPUX/cpu3/online" \
-        "$CPUX/cpu4/online" "$CPUX/cpu5/online" "$CPUX/cpu6/online" "$CPUX/cpu7/online" 2>/dev/null)
-    while IFS='|' read -r k v; do
+        "$CPUX/cpu4/online" "$CPUX/cpu5/online" "$CPUX/cpu6/online" "$CPUX/cpu7/online" \
+        "$BATT/current_now" "$BATT/voltage_now" "$BATT/status" 2>/dev/null)
+    while IFS='|' read -r k f1 f2 f3 f4 f5 f6 f7; do
         case "$k" in
-            "$P0/scaling_min_freq") p0min=$v ;; "$P0/scaling_max_freq") p0max=$v ;;
-            "$P0/scaling_cur_freq") p0cur=$v ;; "$P0/scaling_governor") p0gov=$v ;;
-            "$P0/scaling_available_frequencies") p0av=$v ;;
-            "$P6/scaling_min_freq") p6min=$v ;; "$P6/scaling_max_freq") p6max=$v ;;
-            "$P6/scaling_cur_freq") p6cur=$v ;; "$P6/scaling_governor") p6gov=$v ;;
-            "$P6/scaling_available_frequencies") p6av=$v ;;
-            "$GCDEV/cur_state") glev=$v ;; "$GPU/max_clock_mhz") gmax=$v ;;
-            "$GPU/clock_mhz") gcur=$v ;; "$GPU/thermal_pwrlevel") gth=$v ;;
-            "$GPU/freq_table_mhz") gfr=$v ;;
-            "$CPUX/cpu0/online") c0=$v ;; "$CPUX/cpu1/online") c1=$v ;;
-            "$CPUX/cpu2/online") c2=$v ;; "$CPUX/cpu3/online") c3=$v ;;
-            "$CPUX/cpu4/online") c4=$v ;; "$CPUX/cpu5/online") c5=$v ;;
-            "$CPUX/cpu6/online") c6=$v ;; "$CPUX/cpu7/online") c7=$v ;;
+            "@sum")  t=$f1; gt=$f2; bt=$f3; pmw=$f4; pma=$f5; pmv=$f6; pst=$f7 ;;
+            "@time") now=$f1 ;;
+            "$P0/scaling_min_freq") p0min=$f1 ;; "$P0/scaling_max_freq") p0max=$f1 ;;
+            "$P0/scaling_cur_freq") p0cur=$f1 ;; "$P0/scaling_governor") p0gov=$f1 ;;
+            "$P0/scaling_available_frequencies") p0av=$f1 ;;
+            "$P6/scaling_min_freq") p6min=$f1 ;; "$P6/scaling_max_freq") p6max=$f1 ;;
+            "$P6/scaling_cur_freq") p6cur=$f1 ;; "$P6/scaling_governor") p6gov=$f1 ;;
+            "$P6/scaling_available_frequencies") p6av=$f1 ;;
+            "$GCDEV/cur_state") glev=$f1 ;; "$GPU/max_clock_mhz") gmax=$f1 ;;
+            "$GPU/clock_mhz") gcur=$f1 ;; "$GPU/thermal_pwrlevel") gth=$f1 ;;
+            "$GPU/freq_table_mhz") gfr=$f1 ;;
+            "$CPUX/cpu0/online") c0=$f1 ;; "$CPUX/cpu1/online") c1=$f1 ;;
+            "$CPUX/cpu2/online") c2=$f1 ;; "$CPUX/cpu3/online") c3=$f1 ;;
+            "$CPUX/cpu4/online") c4=$f1 ;; "$CPUX/cpu5/online") c5=$f1 ;;
+            "$CPUX/cpu6/online") c6=$f1 ;; "$CPUX/cpu7/online") c7=$f1 ;;
         esac
     done <<SYSEOF
 $raw
 SYSEOF
-    t=$(cpu_temp); gt=$(get "$GPU/temp"); bt=$(batt_temp)
+    # 一个都没读到(awk 失败)时给安全默认值, 别把空串塞进 JSON
     is_num "$t" || t=0
     is_num "$gt" || gt=0
     is_num "$bt" || bt=0
+    is_num "$pmw" || pmw=0
+    is_num "$pma" || pma=0
+    is_num "$pmv" || pmv=0
+    is_num "$now" || now=0
+    if is_num "$until" && [ "$now" -gt 0 ]; then
+        maxleft=$((until - now))
+        [ "$maxleft" -lt 0 ] && maxleft=0
+    fi
+
+    # 转义与数组拼接全在当前 shell 完成: $(jstr ...) 每次都要 fork 子 shell
+    jesc "$prof";  local profj=$JSTR
+    jesc "$p0gov"; local p0gj=$JSTR
+    jesc "$p6gov"; local p6gj=$JSTR
+    jarrv "$p0av"; local p0aj=$JARR
+    jarrv "$p6av"; local p6aj=$JARR
+    jarrv "$gfr";  local gfj=$JARR
+    # 档位表是静态的, 缓存成单行 JSON: 老实现每次 state 都要 9 条 × 4 次 $(jstr),
+    # 等于 36 个子 shell。现在命中缓存时用 shell 内建 read, 零 fork。
+    local pj=""
+    PJ="$STATE/profiles.json"
+    if [ ! -s "$PJ" ] || [ "$MODDIR/bin/profiles.sh" -nt "$PJ" ]; then
+        profiles_dump | awk -F'|' '
+            BEGIN { printf "[" }
+            {
+                if (NR>1) printf ","
+                printf "{\"k\":\"%s\",\"n\":\"%s\",\"d\":\"%s\",\"p0\":[%s,%s],\"p6\":[%s,%s],\"gpu\":\"%s\"}", $1, $2, $3, $4, $5, $6, $7, $9
+            }
+            END { printf "]" }' > "$PJ" 2>/dev/null
+    fi
+    [ -s "$PJ" ] && read -r pj < "$PJ"
+    [ -z "$pj" ] && pj='[]'
 
     header
     printf '{'
     printf '"ok":1,'
-    printf '"profile":"%s",' "$(jstr "$prof")"
+    printf '"profile":"%s",' "$profj"
     printf '"watch":%s,' "$watch"
     printf '"throttled":%s,' "$thr"
     printf '"limit":%s,' "$lim"
     printf '"maxSeconds":%s,' "$msec"
     printf '"maxLeft":%s,' "$maxleft"
     printf '"temp":%s,"gpuTemp":%s,"battTemp":%s,' "$t" "$gt" "$bt"
+    # power: mw 为绝对值, ma/mv 保号(负电流=充电中), st 交给前端翻译
+    printf '"power":{"mw":%s,"ma":%s,"mv":%s,"st":"%s"},' \
+        "$pmw" "$((pma / 1000))" "$((pmv / 1000))" "$pst"
     printf '"p0":{"id":"p0","name":"性能核 0-5","cpus":"0-5","min":%s,"max":%s,"cur":%s,"gov":"%s","avail":%s},' \
-        "$p0min" "$p0max" "$p0cur" "$(jstr "$p0gov")" "$(jarr "$p0av")"
+        "$p0min" "$p0max" "$p0cur" "$p0gj" "$p0aj"
     printf '"p6":{"id":"p6","name":"超大核 6-7","cpus":"6-7","min":%s,"max":%s,"cur":%s,"gov":"%s","avail":%s},' \
-        "$p6min" "$p6max" "$p6cur" "$(jstr "$p6gov")" "$(jarr "$p6av")"
+        "$p6min" "$p6max" "$p6cur" "$p6gj" "$p6aj"
     printf '"gpu":{"level":%s,"maxMhz":%s,"curMhz":%s,"thermal":%s,"freqs":%s},' \
-        "$glev" "$gmax" "$gcur" "$gth" "$(jarr "$gfr")"
+        "$glev" "$gmax" "$gcur" "$gth" "$gfj"
     printf '"cores":[%s,%s,%s,%s,%s,%s,%s,%s],' "$c0" "$c1" "$c2" "$c3" "$c4" "$c5" "$c6" "$c7"
-
-    printf '"profiles":['
-    local first=1 k n d a b c e g l
-    profiles_dump | while IFS='|' read -r k n d a b c e g l; do
-        [ "$first" = "1" ] || printf ','
-        first=0
-        printf '{"k":"%s","n":"%s","d":"%s","p0":[%s,%s],"p6":[%s,%s],"gpu":"%s"}' \
-            "$(jstr "$k")" "$(jstr "$n")" "$(jstr "$d")" "$a" "$b" "$c" "$e" "$(jstr "$l")"
-    done
-    printf ']'
+    printf '"profiles":%s' "$pj"
     printf '}'
 }
 

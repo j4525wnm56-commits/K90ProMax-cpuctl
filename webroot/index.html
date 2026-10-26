@@ -42,6 +42,7 @@ body{
 .p0 .val{color:var(--p0)} .p0 .bar i,.p0 .bar b{background:var(--p0)}
 .p6 .val{color:var(--p6)} .p6 .bar i,.p6 .bar b{background:var(--p6)}
 .gp .val{color:var(--gpu)} .gp .bar i,.gp .bar b{background:var(--gpu)}
+.pw .val{color:var(--acc)} .pw .bar i,.pw .bar b{background:var(--acc)}
 
 .sec{font-size:12px;color:var(--dim);font-weight:600;margin:18px 0 9px;display:flex;align-items:center;gap:7px}
 .sec .badge{display:none;font-size:10px;font-weight:500;color:var(--acc);background:rgba(62,224,197,.14);padding:1px 7px;border-radius:8px}
@@ -201,6 +202,13 @@ input[type=range].gp::-webkit-slider-thumb{background:var(--gpu);box-shadow:0 0 
   <div class="bar"><i id="bg"></i><b id="kg"></b></div>
 </div>
 
+<div class="cl pw">
+  <div class="top"><span class="nm">实时功耗</span><span class="cpus" id="pst">--</span></div>
+  <div class="val" id="vp">--<small>W</small></div>
+  <div class="rng" id="rp">--</div>
+  <div class="bar"><i id="bp"></i><b id="kp"></b></div>
+</div>
+
 <div class="sec">档位</div>
 <div class="grid" id="profiles"></div>
 
@@ -317,6 +325,7 @@ function render(j){
   setCluster("0", j.p0);
   setCluster("6", j.p6);
   setGpu(j.gpu);
+  setPower(j.power);
   renderCores(j.cores);
 
   // 档位按钮
@@ -376,6 +385,19 @@ function setGpu(g){
 }
 
 // 核心开关: cpu0 无 online 节点, 固定禁用
+var ST_MAP={Charging:"充电中",Full:"已充满",Discharging:"放电中","Not charging":"未充电",Unknown:"状态未知"};
+function setPower(p){
+  if(!p){ return; }
+  var w=(p.mw||0)/1000;
+  $("vp").innerHTML = w.toFixed(2)+'<small>W</small>';
+  $("pst").textContent = ST_MAP[p.st] || p.st || "--";
+  // 电流符号: 内核惯例负值=充电, 显示统一取绝对值, 方向看上面的状态
+  $("rp").textContent = (p.mv/1000).toFixed(2)+" V × "+Math.abs(p.ma)+" mA";
+  var pct=Math.max(0,Math.min(1,w/12));
+  $("bp").style.width=(pct*100)+"%";
+  $("kp").style.left=(pct*100)+"%";
+}
+
 function renderCores(arr){
   var box=$("cgrid");
   if(!box._built){

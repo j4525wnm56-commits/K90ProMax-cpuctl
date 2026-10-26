@@ -19,6 +19,7 @@ P6=$CFG/policy6
 CPUX=/sys/devices/system/cpu
 CORES=$STATE/cores
 GPU=/sys/class/kgsl/kgsl-3d0
+BATT=/sys/class/power_supply/battery
 # cooling_device 编号在多次启动之间会变(实测 37 一度变成 cdsp_hw, gpu 落到 35),
 # 绝不能硬编码。下面两个变量只是兜底, 真正取值由 resolve_gpu_cdev 按 type 解析。
 GCDEV=/sys/class/thermal/cooling_device37
@@ -100,6 +101,41 @@ fmt_t() {
     i=$((v / 1000))
     d=$(( (v % 1000) / 100 ))
     echo "${neg}$i.$d℃"
+}
+
+# ---------------- 功耗 ----------------
+# 电池节点: current_now(µA) / voltage_now(µV) / status
+# 内核惯例: 电流为负表示正在充电, 为正表示放电。功率一律取绝对值, 方向看 status。
+batt_power() {
+    local out mw ma mv st stcn w d
+    out=$(awk '
+        FILENAME ~ "current_now$" { I=$1+0; next }
+        FILENAME ~ "voltage_now$" { V=$1+0; next }
+        FILENAME ~ "status$"      { ST=$1; next }
+        END {
+            mw=(V*I)/1000000000; if (mw<0) mw=-mw
+            printf "%d|%d|%d|%s\n", mw, I/1000, V/1000, ST
+        }
+    ' "$BATT/current_now" "$BATT/voltage_now" "$BATT/status" 2>/dev/null)
+    [ -z "$out" ] && { echo "读不到电池信息"; return 1; }
+    IFS='|' read -r mw ma mv st <<EOF
+$out
+EOF
+    is_num "$mw" || mw=0
+    is_num "$ma" || ma=0
+    is_num "$mv" || mv=0
+    ma=${ma#-}
+    case "$st" in
+        Charging)       stcn="充电中" ;;
+        Full)           stcn="已充满" ;;
+        Discharging)    stcn="放电中" ;;
+        "Not charging") stcn="未充电" ;;
+        *)              stcn=${st:-未知} ;;
+    esac
+    w=$((mw / 1000))
+    d=$(( (mw % 1000) / 10 ))
+    printf '%d.%02d W  (%d.%02dV × %dmA, %s)' \
+        "$w" "$d" $((mv / 1000)) $(( (mv % 1000) / 10 )) "$ma" "$stcn"
 }
 
 # ---------------- 频率换算 ----------------
@@ -517,6 +553,8 @@ cmd_gpu() {
 
 cmd_temp() { echo "CPU=$(fmt_t "$(cpu_temp)") GPU=$(fmt_t "$(gpu_temp)") 电池=$(fmt_t "$(batt_temp)")"; }
 
+cmd_power() { batt_power; echo; }
+
 # ---------------- 限核 ----------------
 cmd_core() {
     local n="$1" v="$2" rc
@@ -767,6 +805,7 @@ cmd_status() {
         echo "核心    : $cs  在线 $on/8  目标 $wm"
     fi
     echo "温度    : CPU $(fmt_t "$(cpu_temp)")  GPU $(fmt_t "$(gpu_temp)")  电池 $(fmt_t "$(batt_temp)")"
+    echo "功耗    : $(batt_power)"
     cmd_watch_status
     local lim; lim=$(get "$STATE/temp_limit"); is_num "$lim" || lim=48000
     echo "温度上限: $(fmt_t "$lim")"
@@ -820,6 +859,7 @@ case "$1" in
     core)        cmd_core "$2" "$3" ;;
     cores)       cmd_cores "$2" ;;
     temp)        cmd_temp ;;
+    power)       cmd_power ;;
     backup)      cmd_backup ;;
     restore)     cmd_apply stock ;;
     watch)
@@ -852,6 +892,7 @@ case "$1" in
         echo "  cpuctl cores [all|8位掩码]       批量限核 (如 11111100 = 关超大核)"
         echo "  cpuctl watch <on|off|status>     自动维持"
         echo "  cpuctl temp                      读取温度"
+        echo "  cpuctl power                     读取实时功耗"
         echo "  cpuctl backup                    重新备份当前配置"
         echo "  cpuctl restore                   还原出厂默认"
         echo "  cpuctl web <start|stop|open>     图形界面"

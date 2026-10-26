@@ -20,6 +20,9 @@ case "$DEVICE" in
         ;;
 esac
 
+# 档位表 JSON 是 api.cgi 生成的缓存, 升级后必须重建, 否则档位描述会停留在旧版本
+rm -f /data/adb/k90_cpuctl/profiles.json
+
 ui_print "- 修正文件权限"
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm_recursive "$MODPATH/bin" 0 0 0755 0755
