@@ -284,9 +284,9 @@ sample_gpuclk() {
     is_num "$RV" && GC=$RV
 }
 
-# 电池功耗: current_now × voltage_now, 变化慢, 隔轮读
+# 电池功耗: current_now × voltage_now
 sample_batt() {
-    local v
+    local v uv ui
     BI=0; BV=0; BT=0; MW=0; CHG=0
     rdg "$BATT/current_now"; v=$RV
     # 正电流 = 电流流向电池(充电), 负电流 = 放电。CHG 只用来给 App 加 "+" 后缀。
@@ -302,10 +302,47 @@ sample_batt() {
     rdg "$BATT/temp"; v=$RV
     case "$v" in -*) v=${v#-} ;; esac
     if is_num "$v"; then [ "$v" -lt 1000 ] && v=$((v * 100)); BT=$v; fi
+
     # 单位: µV × µA = pW, /1e9 才是 mW。
     # 旧代码写的 /1e6 得到的是 µW, 却被当 mW 显示 —— 结果大了 1000 倍。
-    MW=$(( (BV * BI) / 1000000000 ))
+    #
+    # 【坑1·32位整数溢出】设备的 /system/bin/sh(mksh) 的 $(( )) 是 **32 位**运算!
+    #   BV(约 4.4e6) × BI(约 6e5) ≈ 2.7e12, 远超 32 位上限 2.1e9 → 回绕,
+    #   再 /1e9 就变成 0~1, 表现为 PWR 恒显示 0.0W 且永不变化。
+    #   实测: 4469000 × 602000 回绕成 1688472704, /1e9 = 1 (真值应是 2690mW)。
+    # 解法: **先除后乘**, 把两个数都缩到 1e3 量级再相乘, 结果落在 32 位内。
+    #   (BV/1000) × (BI/1000) / 1000 → 4469 × 602 / 1000 = 2690 ✓
+    #   精度损失 <1%, 对显示足够。
+    if [ "$BV" -gt 0 ] && [ "$BI" -gt 0 ]; then
+        MW=$(( (BV / 1000) * (BI / 1000) / 1000 ))
+    else
+        MW=0
+    fi
     [ "$MW" -lt 0 ] && MW=$((0 - MW))
+
+    # 【坑2·电池满电后 current_now≈0】插着充电器且电池已充满(status=Full)时,
+    #   电池不再充放电, current_now 会掉到 0~9mA 的涓流噪声 → PWR 恒显示 0.0W,
+    #   看着像"坏掉了"。但此时整机功耗全从充电器来, 真实值在 USB 输入侧:
+    #   /sys/class/power_supply/usb/current_now(594000µA) × voltage_now(4983000µV) ≈ 2960mW
+    #   所以: 电池侧算出的功耗过小(阈值 100mW)时, 改用 USB(无线则用 wireless)输入功率兜底。
+    #   这样插电时显示的是"整机从充电器取的功率", 比电池电流更有意义。
+    if [ "$MW" -lt 100 ]; then
+        for _ps in usb wireless; do
+            [ -e "/sys/class/power_supply/$_ps/online" ] || continue
+            rdg "/sys/class/power_supply/$_ps/online"
+            [ "$RV" = "1" ] || continue
+            rdg "/sys/class/power_supply/$_ps/current_now";  ui=$RV
+            rdg "/sys/class/power_supply/$_ps/voltage_now"; uv=$RV
+            case "$ui" in -*) ui=${ui#-} ;; esac
+            is_num "$ui" && is_num "$uv" || continue
+            [ "$ui" -gt 0 ] && [ "$uv" -gt 0 ] || continue
+            # 单位守卫: usb 的 voltage_now 是 µV(4983000), 但 wireless 的是 mV(4454),
+            #   量级差 1000 倍。低于 100000 判定为 mV, 补 ×1000 再算。
+            [ "$uv" -lt 100000 ] && uv=$(( uv * 1000 ))
+            MW=$(( (uv / 1000) * (ui / 1000) / 1000 ))
+            break
+        done
+    fi
     return 0
 }
 

@@ -61,7 +61,10 @@ public class HudService extends Service implements Runnable {
     private static final int TH_FREQ = 150000;   // 150 MHz
     private static final int TH_TEMP = 1000;     // 1 ℃
     private static final int TH_GPU = 100;       // 100 MHz
-    private static final int TH_PWR = 500;       // 0.5 W
+    // 功耗阈值 0.05W(v1.8.3)。原来用 500mW(0.5W) 太粗: 实测电池电流每秒只波动
+    // 几十 mA, 换算成功耗约 200mW, 根本达不到 0.5W 阈值 → PWR 看起来"卡住不更新"。
+    // 改成 50mW 后正常负载下几百毫秒就能跟上, 又不至于每个采样都刷(浪费 setText)。
+    private static final int TH_PWR = 50;        // 0.05 W
     private static final int TH_GPU_USE = 5;     // GPU 占用变化 5% 才重画, 免得数字乱跳
     private static final long HEARTBEAT_MS = 30000L;  // 再稳也要 30 秒刷一次
 
