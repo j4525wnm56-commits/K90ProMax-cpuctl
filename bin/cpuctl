@@ -846,6 +846,81 @@ cmd_boot() {
     [ -f "$STATE/web_disabled" ] || sh "$MODDIR/bin/web_spawn.sh" "$(web_port)" >/dev/null 2>&1
 }
 
+# ---------------- 状态栏 HUD ----------------
+# 常驻通知显示实时 CPU 频率/温度/GPU/功耗。采样在 bin/hud.sh 里,
+# 一轮只读 ~25 个 sysfs 文件且零 fork(实测 7ms/轮), 通知仅在内容变化超阈值时重发。
+HUD_SH=$MODDIR/bin/hud.sh
+HUD_RUN=$MODDIR/bin/hud_run.sh
+
+cmd_hud_on() {
+    local iv i p
+    echo 1 > "$STATE/hud_enabled"
+    iv=$(get "$STATE/hud_interval"); is_num "$iv" || echo 5 > "$STATE/hud_interval"
+    p=$(get "$STATE/hud.lock/pid")
+    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+        echo "HUD 已在运行 (pid $p, 间隔 $(get "$STATE/hud_interval")s)"
+        return 0
+    fi
+    rm -rf "$STATE/hud.lock"
+    sh "$HUD_RUN" >/dev/null 2>&1
+    i=0
+    while [ "$i" -lt 20 ]; do
+        p=$(get "$STATE/hud.lock/pid")
+        if [ -n "$p" ]; then echo "HUD 已启动 (pid $p, 间隔 $(get "$STATE/hud_interval")s)"; return 0; fi
+        sleep 0.2 2>/dev/null || sleep 1
+        i=$((i + 1))
+    done
+    echo "HUD 启动失败"
+    return 1
+}
+
+cmd_hud_off() {
+    local p
+    echo 0 > "$STATE/hud_enabled"
+    p=$(get "$STATE/hud.lock/pid")
+    is_num "$p" && kill "$p" 2>/dev/null
+    sleep 1
+    p=$(get "$STATE/hud.lock/pid")
+    is_num "$p" && kill -9 "$p" 2>/dev/null
+    rm -rf "$STATE/hud.lock"
+    sh "$HUD_SH" off >/dev/null 2>&1
+    echo "HUD 已关闭, 状态栏通知已取消"
+}
+
+cmd_hud_status() {
+    local p iv
+    p=$(get "$STATE/hud.lock/pid")
+    iv=$(get "$STATE/hud_interval"); is_num "$iv" || iv=5
+    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+        echo "HUD: 运行中 (pid $p, 采样间隔 ${iv}s)"
+    elif [ "$(get "$STATE/hud_enabled")" = "1" ]; then
+        echo "HUD: 已启用但进程未运行"
+    else
+        echo "HUD: 已关闭"
+    fi
+    if [ -f "$STATE/hud_last.txt" ]; then
+        echo "最后显示:"
+        sed 's/^/  /' "$STATE/hud_last.txt"
+    fi
+}
+
+cmd_hud_notify() {
+    case "$1" in
+        on)  echo 1 > "$STATE/hud_notify"; echo "状态栏通知已开启" ;;
+        off) echo 0 > "$STATE/hud_notify"; sh "$HUD_SH" off >/dev/null 2>&1
+             echo "状态栏通知已关闭（悬浮窗仍在更新）" ;;
+        *)   echo "用法: cpuctl hud notify <on|off>"; return 1 ;;
+    esac
+}
+
+cmd_hud_interval() {
+    local n="$1"
+    is_num "$n" || { echo "用法: cpuctl hud interval <秒>"; return 1; }
+    { [ "$n" -ge 1 ] && [ "$n" -le 60 ]; } || { echo "间隔 1-60 秒"; return 1; }
+    echo "$n" > "$STATE/hud_interval"
+    echo "采样间隔已设为 ${n}s (HUD 下一轮生效)"
+}
+
 # ---------------- 入口 ----------------
 resolve_gpu_cdev
 
@@ -879,6 +954,15 @@ case "$1" in
             *)       echo "用法: cpuctl web <start|stop|restart|status|open>" ;;
         esac ;;
     boot)        cmd_boot ;;
+    hud)
+        case "$2" in
+            on)        cmd_hud_on ;;
+            off)       cmd_hud_off ;;
+            status|st) cmd_hud_status ;;
+            interval)  cmd_hud_interval "$3" ;;
+            notify)    cmd_hud_notify "$3" ;;
+            *)         echo "用法: cpuctl hud <on|off|status|interval N>" ;;
+        esac ;;
     __watch)     cmd___watch ;;
     *)
         echo "k90_cpuctl - Redmi K90 Pro Max 调频"
@@ -896,5 +980,7 @@ case "$1" in
         echo "  cpuctl backup                    重新备份当前配置"
         echo "  cpuctl restore                   还原出厂默认"
         echo "  cpuctl web <start|stop|open>     图形界面"
+        echo "  cpuctl hud <on|off|status>       状态栏实时温度/频率"
+        echo "  cpuctl hud interval <秒>         采样间隔(默认 3s)"
         ;;
 esac

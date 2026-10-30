@@ -127,11 +127,14 @@ batt_temp() {
 }
 
 do_state() {
-    local prof watch lim thr maxleft until now=0 msec
+    local prof watch hud hudiv lim thr maxleft until now=0 msec
     # 状态文件都是 /data 下的普通文件, 用 shell 内建 read 直读:
     # 原来 6 次 $(cat) 就是 6 次 fork, 按 25ms 单价约 150ms
     prof="";   [ -f "$STATE/profile" ] && read -r prof < "$STATE/profile"; [ -z "$prof" ] && prof=stock
     watch=0;   [ -f "$STATE/watch_enabled" ] && read -r watch < "$STATE/watch_enabled"
+    hud=0;     [ -f "$STATE/hud_enabled" ] && read -r hud < "$STATE/hud_enabled"
+    hudiv=3;   [ -f "$STATE/hud_interval" ] && read -r hudiv < "$STATE/hud_interval"
+    is_num "$hudiv" || hudiv=3
     lim=48000; [ -f "$STATE/temp_limit" ] && read -r lim < "$STATE/temp_limit"
     thr=0;     [ -f "$STATE/throttled" ] && read -r thr < "$STATE/throttled"
     msec=300;  [ -f "$STATE/max_seconds" ] && read -r msec < "$STATE/max_seconds"
@@ -248,7 +251,7 @@ SYSEOF
     printf '{'
     printf '"ok":1,'
     printf '"profile":"%s",' "$profj"
-    printf '"watch":%s,' "$watch"
+    printf '"watch":%s,"hud":%s,"hudInterval":%s,' "$watch" "$hud" "$hudiv"
     printf '"throttled":%s,' "$thr"
     printf '"limit":%s,' "$lim"
     printf '"maxSeconds":%s,' "$msec"
@@ -379,6 +382,25 @@ do_action() {
             msg=$(sh "$CP" backup 2>&1)
             header
             printf '{"ok":1,"msg":"已重新备份当前配置"}'
+            ;;
+        hud)
+            local v
+            v=$(getv value)
+            case "$v" in
+                0) msg=$(sh "$CP" hud off 2>&1) ;;
+                1) msg=$(sh "$CP" hud on 2>&1) ;;
+                *) header; printf '{"ok":0,"msg":"参数非法"}'; return 0 ;;
+            esac
+            header; printf '{"ok":1,"msg":"%s"}' "$(jstr "$msg")"
+            ;;
+        hud_interval)
+            local v
+            v=$(getv value)
+            if ! is_num "$v" || [ "$v" -lt 1 ] || [ "$v" -gt 60 ]; then
+                header; printf '{"ok":0,"msg":"间隔 1-60 秒"}'; return 0
+            fi
+            echo "$v" > "$STATE/hud_interval"
+            header; printf '{"ok":1,"msg":"采样间隔已设为 %ss"}' "$v"
             ;;
         restore)
             msg=$(sh "$CP" restore 2>&1)

@@ -8,6 +8,12 @@ STATE=/data/adb/k90_cpuctl
 LOCK="$STATE/watch.lock"
 
 mkdir -p "$STATE"
+# 同上: 陈旧锁会让守护永远起不来
+if [ -d "$LOCK" ]; then
+    _p=$(cat "$LOCK/pid" 2>/dev/null)
+    if [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null; then exit 0; fi
+    rm -rf "$LOCK"
+fi
 mkdir "$LOCK" 2>/dev/null || exit 0
 
 nohup sh "$MODDIR/bin/cpuctl" __watch >/dev/null 2>&1 &

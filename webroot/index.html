@@ -271,6 +271,14 @@ input[type=range].gp::-webkit-slider-thumb{background:var(--gpu);box-shadow:0 0 
       </div>
       <label class="tog"><input type="checkbox" id="watch"><i></i></label>
     </div>
+    <div class="sw">
+      <div>
+        <div class="t">状态栏 HUD</div>
+        <div class="s">常驻通知显示实时温度/频率/GPU, 内容变化才刷新</div>
+      </div>
+      <label class="tog"><input type="checkbox" id="hud"><i></i></label>
+    </div>
+    <div class="srow"><label>HUD 间隔</label><input type="range" id="hudiv" min="1" max="10" step="1"><span class="num" id="nhudiv">--</span></div>
     <div class="grp">
       <div class="gh"><em>温度保护上限</em><span id="hlim">--</span></div>
       <div class="srow"><label>上限</label><input type="range" id="lim" min="35" max="65" step="1"><span class="num" id="nlim">--</span></div>
@@ -349,6 +357,9 @@ function render(j){
   // 开关与温度
   if(!dragging){
     $("watch").checked = j.watch==1;
+    $("hud").checked = j.hud==1;
+    $("hudiv").value = j.hudInterval||3;
+    $("nhudiv").textContent = (j.hudInterval||3)+" s";
     $("lim").value = Math.round(j.limit/1000);
     $("nlim").textContent = Math.round(j.limit/1000)+" °C";
     $("hlim").textContent = "高于此温度停止干预";
@@ -535,6 +546,9 @@ $("btnResetCustom").onclick=resetCustom;
 $("btnCoresAll").onclick=function(){ act("cores&mask=11111111"); };
 $("btnCoresBig").onclick=function(){ act("cores&mask=11111100"); };
 $("watch").onchange=function(){ act("watch&value="+(this.checked?1:0),"",true); };
+$("hud").onchange=function(){ act("hud&value="+(this.checked?1:0),"",true); };
+$("hudiv").oninput=function(){ $("nhudiv").textContent=this.value+" s"; };
+$("hudiv").onchange=function(){ act("hud_interval&value="+this.value,"",true); };
 $("lim").oninput=function(){ $("nlim").textContent=this.value+" °C"; };
 $("lim").onchange=function(){ act("temp_limit&value="+(+this.value*1000)); };
 $("btnBackup").onclick=function(){ act("backup"); };

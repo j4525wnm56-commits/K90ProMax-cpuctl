@@ -10,3 +10,10 @@ desktop.ini
 # 调试截图
 *.png
 !docs/*.png
+
+# 悬浮窗工程的构建中间产物
+overlay/build/
+
+# 签名密钥（overlay/build.sh 会在本地自动生成，不入库）
+*.jks
+*.keystore

@@ -348,6 +348,80 @@ su -c "sh /data/adb/modules/k90_cpuctl/bin/cpuctl restore"   # 命令行
 
 ---
 
+## 状态栏 HUD（v1.6.0 新增）
+
+两条通道可以同时用，也可以只用其中一条：
+
+| 通道 | 形态 | 开关 |
+|---|---|---|
+| **通知** | 常驻通知，展开看三行明细 | `cpuctl hud on` / `hud notify on` |
+| **悬浮窗** | 状态栏那一行贴一行小字，任意位置 | 模块自带 APK，`service.sh` 开机自动拉起 |
+
+![状态栏 HUD](docs/hud-preview.png)
+
+上图上半是白底 App（黑字贴白底，底衬自动隐形），下半是深色桌面（半透明白底衬托住黑字）。
+
+显示内容：
+
+```
+CPU: 883M/1.55G  GPU: 539M  TEMP: 41℃  PWR: 0.9W
+     │            │         │         └─ 整机功耗（电池 current × voltage）
+     │            │         └─────────── CPU 最高温（21 个 cpu* zone 取最大）
+     │            └───────────────────── GPU 频率（kgsl clock_mhz）
+     └────────────────────────────────── 性能核 cpu0-5 / 超大核 cpu6-7
+```
+
+默认 **5 秒**刷新（`cpuctl hud interval <1-60>` 可改），频率/GPU 取 5 次采样的**中位数**平滑，
+温度/功耗取最新值（它们变得慢，平滑会滞后）。
+
+### 怎么让文字落在状态栏那一行
+
+通知图标只能排左上角，而且 `cmd notification post -i file://...png` 指定的自定义图标
+在 MIUI 上**会被直接忽略**（实测截图确认）。所以要贴在状态栏里只能画悬浮窗。
+
+`overlay/` 是配套的极简 App（`com.langrm.k90hud`，16KB）：
+
+- 不读 sysfs、**不要 root**，只轮询模块写的 `/data/local/tmp/k90_hud.txt`
+- 一行 5 个整数 `<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <mW>`，排版在 App 侧做
+- 位置可调：`echo "48 5" > /data/local/tmp/k90_hud_pos.txt`（单位 dp，2 秒生效）
+- 防烧屏：每 10 分钟随机偏移 ±2px
+- 横屏隐藏、息屏不刷新
+- 默认**黑字 + 60% 半透明白底衬**：白底 App 上底衬隐形、深色壁纸上托住黑字
+
+编译（不需要 Gradle）：
+
+```sh
+cd overlay && ./build.sh      # aapt2 + javac + d8 + zipalign + apksigner
+```
+
+### 开销（50 秒实测，`/proc/<pid>/stat`）
+
+| 进程 | CPU 时间 | 单核占比 |
+|---|---|---|
+| `hud.sh`（采样守护） | 30ms | **0.06%** |
+| `k90hud`（悬浮窗） | 110ms | **0.22%** |
+
+压开销的具体手段：
+
+| 手段 | 做法 | 效果 |
+|---|---|---|
+| 取值方式 | **不用 awk、不用 cat、不用 `$(...)`**：全部 `read < file` 内建读 + 全局变量 | awk 方案 32ms/轮 → **7ms/轮** |
+| 温度源 | 启动时筛一次 `thermal_zone*/type`，只留 `cpu*`，并**剔除 `*trip*`** | 21 个 zone（全机近百个） |
+| 分级采样 | 频率 + GPU 每 5s，温度 + 功耗每 10s | 最贵的 21 个 zone 只读一半次数 |
+| 显示防抖 | 频率变 <150MHz / 温度 <1℃ / GPU <100MHz / 功耗 <0.5W 就不重画，30s 心跳兜底 | 数字不再跳得晃眼 |
+| 息屏 | 只读一个 backlight 文件，读到 0 就 sleep 15s | 息屏零采样 |
+
+### 踩过的坑
+
+| 现象 | 原因 / 解法 |
+|---|---|
+| 温度长年显示 95℃ | `cpu-hw-trip-0/1` 报的是**硬件跳闸阈值**（固定 95000），不是温度，筛 zone 时要排除 `*trip*` |
+| 重装 APK 后悬浮窗消失 | `pm install -r` 会把 `SYSTEM_ALERT_WINDOW` 重置成 `ignore`：窗口在（`dumpsys window` 能看到）但 `mAppOpVisibility=false`。必须 `install → 等 1s → appops set → 启动` |
+| 通知栏多一条划不掉的"正在其他应用的上层显示内容" | AOSP `AlertWindowNotification`（`pkg=android`，ONGOING）。没有系统开关，只能 `cmd notification snooze`，`hud.sh` 每 50 分钟续期 |
+| 守护被强杀后再也起不来 | `hud.lock` 残留导致 `mkdir` 失败即退出。改为先判 pid 存活，死了就清锁 |
+| 想跟着系统状态栏图标黑白自动变色 | 做不到。这版 HyperOS 的 `dumpsys` **不输出 `appearance` 字段**，只能靠截屏猜像素（`screencap` 一次 211ms），代价远超收益。已放弃，改用默认黑字 |
+| `d8` 编译带内部类的 class 崩 | 本机 `d8 8.2.2` 遇 `InnerClasses` 属性 NPE（JDK 21 也一样）。代码里禁用 lambda / 匿名内部类 |
+
 ## 卸载
 
 管理器里删除模块即可。`uninstall.sh` 依次：停守护 → 停界面 → 读快照还原 CPU/GPU → 清理运行状态（**保留备份文件**）。
