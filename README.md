@@ -390,7 +390,16 @@ CPU: 883M/1.55G  GPU: 539M  TEMP: 41℃  PWR: 0.9W
 - 横屏隐藏、息屏不刷新
 - 默认**黑字 + 60% 半透明白底衬**：白底 App 上底衬隐形、深色壁纸上托住黑字
 
-编译（不需要 Gradle）：
+不想刷模块、只想要状态栏这行字的话，直接下 Release 里的 `K90HUD-<版本>.apk` 装即可
+（APK 的 versionCode 与模块对齐，一眼能看出装的哪版）：
+
+```sh
+adb install -r K90HUD-v1.6.5.apk
+adb shell appops set com.langrm.k90hud SYSTEM_ALERT_WINDOW allow   # 重装后必须补
+adb shell am start-foreground-service -n com.langrm.k90hud/.HudService
+```
+
+自己从源码编译（不需要 Gradle）：
 
 ```sh
 cd overlay && ./build.sh      # aapt2 + javac + d8 + zipalign + apksigner
