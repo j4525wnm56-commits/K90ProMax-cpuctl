@@ -365,14 +365,19 @@ su -c "sh /data/adb/modules/k90_cpuctl/bin/cpuctl restore"   # 命令行
 显示内容：
 
 ```
-CPU: 883M/1.55G  PSI: 44%  GPU: 539M  TEMP: 41℃  PWR: 0.9W
-     │            │        │         │         └─ 整机功耗（电池 current × voltage）
-     │            │        │         │            默认显示"耗电"；充电时后面加 "+"，如 PWR: 5.8W+
-     │            │        │         └────────── CPU 最高温（21 个 cpu* zone 取最大）
-     │            │        └──────────────────── GPU 频率（kgsl clock_mhz）
-     │            └───────────────────────────── CPU 压力（/proc/pressure/cpu avg10，
-     │                                            最近 10s 有百分之几的时间在等调度；
-     │                                            比频率更能说明"真在满载/卡顿"）
+CPU: 883M/1.55G PSI: 44% GPU: 539M TEMP: 41℃ PWR: 0.9W FPS: 60/120Hz
+     │           │       │        │        │        └─ 实时帧率/面板刷新率（v1.7.0）
+     │           │       │        │        │           FPS=高通 DRM measured_fps，是屏幕合成帧率：
+     │           │       │        │        │           静止无新帧时显示 "-"，滑动/游戏时才跳数字
+     │           │       │        │        │           120Hz=面板实测刷新率(mi_display hw_vsync_info)
+     │           │       │        │        └─ 整机功耗（电池 current × voltage）
+     │           │       │        │           默认显示"耗电"；充电时后面加 "+"，如 PWR: 5.8W+
+     │           │       │        └───────── CPU 最高温（21 个 cpu* zone 取最大）
+     │           │       └────────────────── GPU 频率（kgsl clock_mhz）
+     │           └────────────────────────── CPU 压力（/proc/pressure/cpu avg10，
+     │                                        最近 10s 有百分之几的时间在等调度；
+     │                                        比频率更能说明"真在满载/卡顿"）
+
      │            │         └─────────── CPU 最高温（21 个 cpu* zone 取最大）
      │            └───────────────────── GPU 频率（kgsl clock_mhz）
      └────────────────────────────────── 性能核 cpu0-5 / 超大核 cpu6-7
@@ -389,10 +394,15 @@ CPU: 883M/1.55G  PSI: 44%  GPU: 539M  TEMP: 41℃  PWR: 0.9W
 `overlay/` 是配套的极简 App（`com.langrm.k90hud`，16KB）：
 
 - 不读 sysfs、**不要 root**，只轮询模块写的 `/data/local/tmp/k90_hud.txt`
-- 一行 5 个整数 `<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <mW>`，排版在 App 侧做
-- 位置可调：`echo "48 5" > /data/local/tmp/k90_hud_pos.txt`（单位 dp，2 秒生效）；App 里拖滑块同样有效，两者按"谁更新"决定
+- 一行 10 个整数 `<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <mW> <充电> <PSI%> <帧率> <刷新率Hz> <GPU占用%>`，排版在 App 侧做
+- **显示格式（v1.8.1）**：`CPU: 性能核/能效核/占用%  GPU: 频率/占用%  TEMP: 39℃  PWR: 1.2W  FPS: 119/120Hz`。CPU 占用复用 PSI（`/proc/pressure/cpu` avg10 = 最近 10s 在等 CPU 的时间占比），不额外采样
+- **GPU 占用**取自高通 KGSL `gpu_busy_percentage`。踩过两个坑：①设备 `/system/bin/sh`(mksh) **不支持 `${v//[^0-9]/}` 否定字符类**，`"16 %"` 会被解析成 `" %"`（数字反被删）→ 恒 0；改用 `${raw%% *}` 截空格。②该节点是**短统计窗口的瞬时值**，单次读大概率撞 0 → 改成**间隔 0.05s 连读 6 次取最大值**，负载下稳定命中（实测 16%）
+- **v1.7.1 起默认顶部水平居中**（`Gravity.CENTER_HORIZONTAL|TOP`）：X = 相对屏幕水平中心的偏移（300=正中），Y = 距顶部距离（0=贴顶，正好落在挖孔上方的空白带，不被遮挡）。竖屏恒定显示；**横屏是否显示可在 App 里单独开关**（不依赖 `onConfigurationChanged`，MIUI 上不可靠，改每 2s 自轮询方向）
+- **v1.8.0 起 App 的"开启/关闭悬浮窗"是真正的启停**：关闭会写 `hud_on=false`，`HudService` 读到后 `stopSelf()` 且返回 `START_NOT_STICKY`，连开机 `service.sh` 的强制拉起也不会复活；再点开启才恢复
+- 位置可调：`echo "300 0" > /data/local/tmp/k90_hud_pos.txt`（X=300 正中，Y=0 贴顶；单位 dp，2 秒生效）；App 里拖滑块同样有效，两者按"谁更新"决定
 - 防烧屏：每 10 分钟随机偏移 ±2px
-- 横屏隐藏、息屏不刷新
+- 息屏不刷新；App 每 2s 读一次状态文件（模块每 5s 全量采样一次）——0.1s 高频档因开销过大已回退
+- **状态文件是覆盖写**（`printf ... > file`），恒定几十字节，不会无限增长
 - 默认**黑字 + 60% 半透明白底衬**：白底 App 上底衬隐形、深色壁纸上托住黑字
 
 不想刷模块、只想要状态栏这行字的话，直接下 Release 里的 `K90HUD-<版本>.apk` 装即可
@@ -440,6 +450,10 @@ cd overlay && ./build.sh      # aapt2 + javac + d8 + zipalign + apksigner
 | 守护被强杀后再也起不来 | `hud.lock` 残留导致 `mkdir` 失败即退出。改为先判 pid 存活，死了就清锁 |
 | 想跟着系统状态栏图标黑白自动变色 | 做不到。这版 HyperOS 的 `dumpsys` **不输出 `appearance` 字段**，只能靠截屏猜像素（`screencap` 一次 211ms），代价远超收益。已放弃，改用默认黑字 |
 | `d8` 编译带内部类的 class 崩 | 本机 `d8 8.2.2` 遇 `InnerClasses` 属性 NPE（JDK 21 也一样）。代码里禁用 lambda / 匿名内部类 |
+| 屏幕一直刷新、怎么都不息屏 | 三个叠加原因：①**之前测 0.1s 高频 FPS 时留下的 `input swipe` 后台脚本没退出**（在 `/proc/<pid>/cmdline` 里能直接看到），它持续滑动造帧，屏幕永远被判为"有活动"；②`stay_on_while_plugged_in=15`（插电常亮）；③调频档位本身在跑、CPU 一直有负载。排查顺序：先 `ps -A | grep input swipe` 看有没有残留滑动进程，再看 `dumpsys power` 的 `mWakefulness`，最后才动调频模块 |
+| GPU 占用恒为 0（v1.8.1） | 两个独立坑：①设备 `/system/bin/sh`(mksh) **不支持 `${v//[^0-9]/}`** —— `[^0-9]` 被当成字面字符集，`"16 %"` 解析成 `" %"`，数字反被删掉。改用 `${raw%% *}` 截空格；②`gpu_busy_percentage` 是**短统计窗口瞬时值**，单次读大概率撞 0（实测连读 12 次仍有 3/6 轮为 0）。改成间隔 0.05s 连读 6 次取最大值，负载下稳定命中 |
+| 悬浮窗开关按钮点了没反应 | 原按钮只会 `startForegroundService`，**从来没有实现"关闭"**（`HudService` 也没记录用户意图）。v1.8.0 起写入持久化 `hud_on` 偏好：`HudService` 在 `onCreate`/`onStartCommand` 读到 `false` 就 `stopSelf()` + 返回 `START_NOT_STICKY`，连开机 `service.sh` 的强制拉起也不会复活 |
+| 重启 HUD 守护后起不来 | `hud.lock/pid` 残留 + `pkill` 后没等进程真死，`hud_run.sh` 的 `mkdir` 原子锁就失败即退出。重启流程要：杀进程 → **等它真的消失** → `rm -rf` 锁目录 → `mkdir` 锁 → `nohup sh hud.sh loop &` → `echo $! > 锁/pid`（少了 `mkdir` 会写不进 pid 文件） |
 
 ## 卸载
 

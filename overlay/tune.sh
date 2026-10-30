@@ -1,11 +1,12 @@
 #!/bin/sh
 # 从 Mac 直接调悬浮窗位置并截图看效果（不用打开 App 拖滑块）
 #
-#   ./tune.sh 96 0        # X=96dp  Y=0dp
+#   ./tune.sh 300 0       # X=300(水平正中)  Y=0(贴顶)   ← v1.7.1 默认
+#   ./tune.sh 240 52      # X=240(左偏60dp)  Y=52(挖孔下方)
 #   ./tune.sh shot        # 只截图
 #
 # 原理: HudService 每 2s 读一次 /data/local/tmp/k90_hud_pos.txt（两列 dp），
-# 有文件就覆盖 App 里存的偏好。
+# 有文件就覆盖 App 里存的偏好。X=相对水平中心偏移(300=正中), Y=距顶部距离(0=贴顶)。
 set -e
 ADB=${ADB:-$HOME/.workbuddy/bin/platform-tools/adb}
 PY=${PY:-/Users/li/.workbuddy/binaries/python/envs/default/bin/python}

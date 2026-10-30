@@ -68,7 +68,7 @@ build_tz_list() {
 }
 
 # ---------- 采样(零 fork) ----------
-BIG=0; LIT=0; CT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0; PSI=0
+BIG=0; LIT=0; CT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0; PSI=0; FPS=0; REF=0
 # 频率: 每轮都读(2 个文件, ~0.5ms)。BIG = 最后一个 policy(超大核簇), LIT = 第一个(小核簇)
 sample_freq() {
     local id v first="" lastv=""
@@ -93,15 +93,33 @@ sample_temp() {
     done < "$TZ_LIST"
 }
 
-# GPU 温度/占用: 只有发通知时才需要
+# GPU 温度 + 占用百分比
+# gpu_busy_percentage 是高通 KGSL 节点, 返回 "16 %" 这种。
+# 【坑1·解析】不能用 ${RV//[^0-9]/}: 设备的 /system/bin/sh(mksh) 不支持 [^0-9] 否定字符类,
+#   实测 "13 %" 会被解析成 " %"(数字反被删掉) -> 恒 0。改用 ${raw%% *} 截到第一个空格, 得 "13"。
+# 【坑2·命中率】这是短统计窗口的瞬时值, 静止/窗口复位时读到 0。守护每 5s 才采一次,
+#   单次读大概率撞 0。实测: 无间隔连读12次取最大, 6轮里3轮仍为0;
+#   间隔0.05s连读6次取最大, 负载下稳定命中(16%)。故每轮间隔连读 6 次取最大。
+#   只在亮屏采样的那一瞬间发生(约0.3s/5s), 不影响息屏/深睡, 开销可忽略。
+GB=0
 sample_gputherm() {
-    local v
+    local v raw i mx
     if [ -e "$KGSL/temp" ]; then
         rdg "$KGSL/temp";      v=$RV; is_num "$v" && GT=$v
-        rdg "$KGSL/gpu_busy_percentage"
-        # "16 %" -> 16, 用参数展开剥掉非数字, 不 fork tr
-        GB=${RV//[^0-9]/}
-        is_num "$GB" || GB=0
+    fi
+    if [ -e "$KGSL/gpu_busy_percentage" ]; then
+        mx=0; i=0
+        while [ "$i" -lt 6 ]; do
+            rdg "$KGSL/gpu_busy_percentage"; raw=$RV
+            v=${raw%% *}                       # "16 %" -> "16"
+            is_num "$v" || v=0
+            [ "$v" -gt "$mx" ] && mx=$v
+            [ "$i" -lt 5 ] && sleep 0.05       # 前5次读后等窗口刷新, 最后一次不等
+            i=$((i + 1))
+        done
+        GB=$mx
+    else
+        GB=0
     fi
     return 0
 }
@@ -118,6 +136,62 @@ sample_psi() {
     PSI=$a
     return 0
 }
+
+# 实时帧率 + 面板刷新率 (高通 SM8850 实测)
+# 帧率: /sys/class/drm/card0-sde-crtc-0/measured_fps -> "fps: 60.5 duration:... frame_count:..."
+#   这是 DRM CRTC 的真实画面合成帧率: 屏幕静止无新帧时=0, 滑动/游戏/动画时才跳到几十。
+#   注意它反映的是"屏幕这一秒画了多少帧", 不是某个 App 的内部 FPS。
+# 刷新率: /sys/class/mi_display/disp-DSI-0/hw_vsync_info -> "fps: 120.109 vsync_period_ns:..."
+#   这是面板实测刷新率(硬件 vsync), 比 dynamic_fps(配置目标值)更准。
+# 各 1 次 read, 纯参数展开解析, 零 fork。节点不存在时自动探测备选路径。
+FPS=0; REF=0
+FPS_NODE=""; REF_NODE=""
+probe_fps_nodes() {
+    local c
+    for c in /sys/class/drm/card0-sde-crtc-0/measured_fps \
+             /sys/class/drm/card0-sde-crtc-1/measured_fps \
+             /sys/class/graphics/fb0/measured_fps; do
+        [ -e "$c" ] && { FPS_NODE=$c; break; }
+    done
+    for c in /sys/class/mi_display/disp-DSI-0/hw_vsync_info \
+             /sys/class/mi_display/disp-DSI-1/hw_vsync_info; do
+        [ -e "$c" ] && { REF_NODE=$c; break; }
+    done
+    return 0
+}
+sample_fps() {
+    local ln n int
+    FPS=0
+    if [ -n "$FPS_NODE" ]; then
+        rdg "$FPS_NODE"; ln=$RV
+        # "fps: 60.5 ..." -> 取 "fps:" 后到空格之间的数, 去掉小数点部分取整
+        ln=${ln#*fps:}          # 去掉前缀到 fps:
+        ln=${ln# }              # 去掉 fps: 后的空格
+        n=${ln%% *}             # 截到第一个空格 -> "60.5"
+        int=${n%%.*}            # 整数部分 -> "60"
+        is_num "$int" && FPS=$int
+    fi
+    return 0
+}
+sample_refresh() {
+    local ln n int
+    REF=0
+    if [ -n "$REF_NODE" ]; then
+        rdg "$REF_NODE"; ln=$RV
+        ln=${ln#*fps:}
+        ln=${ln# }
+        n=${ln%% *}
+        int=${n%%.*}
+        is_num "$int" && REF=$int
+    fi
+    # 回退: 若没有 hw_vsync_info, 用 dynamic_fps(配置目标值)
+    if [ "$REF" = "0" ] && [ -e /sys/class/mi_display/disp-DSI-0/dynamic_fps ]; then
+        rdg /sys/class/mi_display/disp-DSI-0/dynamic_fps
+        is_num "$RV" && REF=$RV
+    fi
+    return 0
+}
+probe_fps_nodes
 
 # GPU 频率: 一个文件, 每轮都读: 一个文件, 每轮都读
 sample_gpuclk() {
@@ -154,12 +228,15 @@ sample_batt() {
 
 # 全量采样(once / post / bench 用)
 sample() {
-    BIG=0; LIT=0; CT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0; PSI=0
+    BIG=0; LIT=0; CT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0; PSI=0; FPS=0; REF=0
     sample_freq
     sample_gpuclk
     sample_temp
     sample_batt
     sample_gputherm
+    sample_psi
+    sample_fps
+    sample_refresh
     return 0
 }
 
@@ -190,6 +267,11 @@ CPU ${F1}℃"
     [ "$CHG" = "1" ] && pw="${pw}+"
     body="$body · $pw"
     body="$body · PSI ${PSI}%"
+    # 帧率/刷新率(节点存在才显示, 与状态栏一致)
+    if [ -n "$FPS_NODE" ]; then
+        body="$body · FPS ${FPS}"
+        [ "$REF" -gt 0 ] && body="$body/${REF}Hz" || body="$body/-Hz"
+    fi
     [ -n "$prof" ] && body="$body · $prof"
     # 只留悬浮窗时把通知关掉(hud_notify=0), 但采样和写文件不能停
     [ "$notify" != "0" ] && cmd notification post -S bigtext -t "$title" "$TAG" "$body" >/dev/null 2>&1
@@ -199,10 +281,11 @@ CPU ${F1}℃"
 # 写给状态栏悬浮窗 App 的紧凑串(它没有 root, 读不了 sysfs, 只能读这个文件)。
 # 用 printf 内建重定向, 不 fork。文件在 /data/local/tmp, 对普通 app 可读(0644)。
 HUD_FILE=/data/local/tmp/k90_hud.txt
-# 格式: "<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <功耗mW> <是否充电1/0> <PSI%>"，排版交给 App。
-# 只写 3 个整数: 不用取模拼小数, 也方便 App 用 split 解析。
+# 格式: "<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <功耗mW> <是否充电1/0> <PSI%> <帧率> <刷新率Hz> <GPU占用%>"，排版交给 App。
+# 全整数: 不用取模拼小数, 也方便 App 用 split 解析。帧率/刷新率节点不存在时为 0(不显示)。
+# 第 10 字段 GB (GPU 占用%) 是 v1.8.0 新增。文件是覆盖写(printf > ), 恒定几十字节, 不会无限增长。
 write_state() {
-    printf '%d %d %d %d %d %d %d\n' "$BIG" "$LIT" "$CT" "$GC" "$MW" "$CHG" "$PSI" > "$HUD_FILE" 2>/dev/null
+    printf '%d %d %d %d %d %d %d %d %d %d\n' "$BIG" "$LIT" "$CT" "$GC" "$MW" "$CHG" "$PSI" "$FPS" "$REF" "$GB" > "$HUD_FILE" 2>/dev/null
 }
 
 # AOSP 的 AlertWindowNotification: 只要 App 在别的应用上层画窗口, WMS 就发一条
@@ -229,6 +312,7 @@ should_post() {
     [ "$df" -ge "$TH_FREQ" ] && return 0
     [ "$dt" -ge "$TH_TEMP" ] && return 0
     [ "$dg" -ge "$TH_GPU" ]  && return 0
+    # 单速率循环: tick 单位是秒, HEARTBEAT 单位也是秒
     [ $((tick - last_tick)) -ge "$HEARTBEAT" ] && return 0
     return 1
 }
@@ -281,25 +365,29 @@ case "$1" in
         ;;
     loop)
         last_key=""; last_tick=0; tick=0
+        # ===== 单速率循环 =====
+        # 所有数据(含帧率/刷新率)统一每 hud_interval(默认 5s)全量采样一次。
+        # 之前试过 0.1s 高频刷 FPS, 守护 CPU 冲到 3.45% 单核(5s 档仅 0.30%, 差 11.5 倍),
+        # 且高频唤醒阻碍 CPU 深睡, 实测开销太大 —— 退回统一 5s。
+        # 高通 DRM 统计窗口 fps_periodicity_ms 一并恢复内核默认 1000ms。
+        FPERIOD=/sys/class/drm/card0-sde-crtc-0/fps_periodicity_ms
+        [ -e "$FPERIOD" ] && echo 1000 > "$FPERIOD" 2>/dev/null
         while :; do
             rdg "$STATE/hud_enabled"; [ "$RV" = "1" ] || break
             rdg "$STATE/hud_interval"; iv=$RV; is_num "$iv" || iv=5
             [ "$iv" -lt 1 ] && iv=1
-            if [ $((tick % 3600)) -eq 0 ]; then snooze_alert; fi
             read_backlight
             if [ "$BL" = "0" ]; then
-                # 息屏: 不采样不推送
+                # 息屏: 不采样不推送, 用长睡眠省电
                 sleep 15; tick=$((tick + 15)); continue
             fi
-            # ---- 分级采样: 频率每轮, 温度隔轮, GPU/电池仅通知模式 ----
-            sample_freq
-            sample_psi
-            sample_gpuclk
-            if [ $((tick % 4)) -eq 0 ] || [ "$CT" = "0" ]; then sample_temp; sample_batt; fi
-            rdg "$STATE/hud_notify"; notify=${RV:-1}
-            [ "$notify" != "0" ] && sample_gputherm
+            # ---- 全量采样: 频率/温度/GPU/电池/PSI/帧率/刷新率, 每 iv 秒一次 ----
+            sample
             write_state
+            rdg "$STATE/hud_notify"; notify=${RV:-1}
             if [ "$notify" != "0" ] && should_post; then render_post; mark_posted; fi
+            # ONGOING 悬浮窗通知每 50 分钟续一次 snooze(tick 单位秒)
+            [ $((tick % 3000)) -eq 0 ] && snooze_alert
             sleep "$iv"; tick=$((tick + iv))
         done
         rm -rf "$STATE/hud.lock"

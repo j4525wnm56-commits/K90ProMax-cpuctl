@@ -32,8 +32,12 @@ import java.io.FileReader;
  * 设计要点:
  *  - 自己不做采样: 模块的 hud.sh 以 root 身份读 sysfs(含 root-only 的 kgsl/backlight),
  *    结果写成 /data/local/tmp/k90_hud.txt。本服务只读这个文件, 完全不需要 root。
- *  - 息屏不更新; 横屏自动隐藏(横屏状态栏本来也不显示时间)。
- *  - 位置 X/Y 可调, 字号 9sp。
+ *  - 息屏不更新; 竖屏恒定顶部水平居中显示; 横屏是否显示由 App 里的"横屏显示"开关决定。
+ *  - 位置: X = 相对屏幕水平中心的偏移(dp, 300=正中), Y = 距屏幕顶部的距离(dp)。
+ *  - 每 2s 读一次状态文件(模块每 5s 采样一次, 100ms 高频读是无谓开销, 已回退)。
+ *  - 总开关 hud_on: App 里"关闭悬浮窗"写 false。本服务在 onCreate/onStartCommand 读取,
+ *    false 就 stopSelf() 且返回 START_NOT_STICKY —— 这样连开机 service.sh 的强制拉起
+ *    也不会把用户关掉的悬浮窗复活。
  *
  * 注意: 本类**不能有匿名内部类** —— 本机这套 d8(8.2.2) 在编译带 InnerClasses 属性的
  * class 时会 NPE("String.length() because parameter1 is null"), 换 JDK 21 也一样。
@@ -46,9 +50,11 @@ public class HudService extends Service implements Runnable {
 
     /** 整体下移 5 个物理像素(用户逐步调: 3 -> +2) */
     private static final int BASE_DY_PX = 5;
-    /** 中位数平滑窗口: 取最近 N 次采样的中位数再显示。
-     *  原始频率在 883M↔1.55G 之间来回跳（差 667MHz），单纯加阈值要么挡不住、要么严重滞后；
-     *  取中位数能让显示稳定在真实中位水平，且对突发尖峰不敏感。 */
+    /** X 滑块中点 = 屏幕水平正中(dp)。滑块 0..600 映射到 -300..+300 的水平偏移。 */
+    private static final int X_CENTER = 300;
+    /** 默认距顶部距离(dp): 0 = 贴状态栏那一行(用户偏好, 压挖孔也要贴顶)。 */
+    private static final int Y_DEFAULT = 0;
+    /** 中位数平滑窗口: 取最近 N 次采样的中位数再显示。 */
     private static final int SMOOTH_N = 5;
 
     /** 显示防抖: 变化小于这些阈值就不刷文本, 免得数字跳得晃眼 */
@@ -56,12 +62,18 @@ public class HudService extends Service implements Runnable {
     private static final int TH_TEMP = 1000;     // 1 ℃
     private static final int TH_GPU = 100;       // 100 MHz
     private static final int TH_PWR = 500;       // 0.5 W
+    private static final int TH_GPU_USE = 5;     // GPU 占用变化 5% 才重画, 免得数字乱跳
     private static final long HEARTBEAT_MS = 30000L;  // 再稳也要 30 秒刷一次
 
-    /** 防烧屏: 每 10 分钟整体随机挪一下, 幅度 ±2px(幅度太大会吃掉"下移 2px"这种微调) */
+    /** 防烧屏: 每 10 分钟整体随机挪一下, 幅度 ±2px */
     private static final long JITTER_MS = 10 * 60 * 1000L;
     private static final int JITTER_RANGE = 2;
     private static final String CH = "hud";
+
+    /** 用户总开关: App 里关闭后写 false, 本服务据此自杀, 开机自启也不会强行复活 */
+    private static final String KEY_HUD_ON = "hud_on";
+    /** 横屏显示独立开关: true=横屏也显示(默认), false=横屏隐藏、竖屏照常 */
+    private static final String KEY_LANDSCAPE = "landscape_show";
 
     private WindowManager wm;
     private TextView tv;
@@ -70,8 +82,8 @@ public class HudService extends Service implements Runnable {
     private SharedPreferences sp;
     private String lastText = "";
     // 最近一次读到的原始值 / 最近一次真正显示的原始值
-    private int rLit, rBig, rT, rGc, rMw, rChg, rPsi;
-    private int sLit, sBig, sT, sGc, sMw, sChg, sPsi;
+    private int rLit, rBig, rT, rGc, rMw, rChg, rPsi, rFps, rRef, rGpu;
+    private int sLit, sBig, sT, sGc, sMw, sChg, sPsi, sFps, sRef, sGpu;
     private long lastShownAt = 0;
     private GradientDrawable pillBg;
     private final int[] hLit = new int[SMOOTH_N];
@@ -80,6 +92,7 @@ public class HudService extends Service implements Runnable {
     private final int[] hGc  = new int[SMOOTH_N];
     private final int[] hMw  = new int[SMOOTH_N];
     private int hIdx = 0, hCnt = 0;
+    /** 当前是否因"横屏 + 关掉了横屏显示"被隐藏 */
     private boolean hidden = false;
     private final java.util.Random rnd = new java.util.Random();
     private long lastJitter = 0;
@@ -91,13 +104,17 @@ public class HudService extends Service implements Runnable {
     @Override public void onCreate() {
         super.onCreate();
         sp = getSharedPreferences("hud", MODE_PRIVATE);
+        // 用户已在 App 里关闭 → 直接退出, 连窗口都不画。
+        // 这条也拦住 service.sh 开机时的无条件 am start-foreground-service。
+        if (!sp.getBoolean(KEY_HUD_ON, true)) {
+            stopSelf();
+            return;
+        }
         startForeground(1, buildNotification());
         wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
         h = new Handler(Looper.getMainLooper());
 
         tv = new TextView(this);
-        // 默认黑字: 用户日常用的 App 绝大多数是白底, 白字在白底上看不见。
-        // 底衬用半透明白, 这样落在深色壁纸上时黑字仍然清晰(白底上则几乎不可见, 无副作用)。
         tv.setTextColor(Color.BLACK);
         tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f);      // 小字
         tv.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
@@ -119,9 +136,10 @@ public class HudService extends Service implements Runnable {
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
-        lp.gravity = Gravity.TOP | Gravity.LEFT;
-        lp.x = dp(sp.getInt("xoff", 96));
-        lp.y = dp(sp.getInt("yoff", 0));
+        // 顶部水平居中: X 相对屏幕水平中心(300=正中), Y 距顶部距离
+        lp.gravity = Gravity.CENTER_HORIZONTAL | Gravity.TOP;
+        lp.x = dp(sp.getInt("xoff", X_CENTER) - X_CENTER);
+        lp.y = dp(sp.getInt("yoff", Y_DEFAULT));
 
         try {
             wm.addView(tv, lp);
@@ -133,17 +151,34 @@ public class HudService extends Service implements Runnable {
         h.post(this);
     }
 
-    /** 定时回调（本类实现 Runnable，避免匿名内部类） */
+    /** 开机 service.sh / 安装脚本用 am start-foreground-service 拉起时也会经过这里。
+     *  hud_on=false → 自杀并返回 START_NOT_STICKY, 防止系统把已关的服务复活。 */
+    @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        if (sp == null) sp = getSharedPreferences("hud", MODE_PRIVATE);
+        if (!sp.getBoolean(KEY_HUD_ON, true)) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        return START_STICKY;
+    }
+
+    /** 定时回调（本类实现 Runnable，避免匿名内部类）
+     *  模块每 5s 采样一次, 这里 2s 读一次文件即可, 不必 100ms 高频空转。 */
     @Override public void run() {
         try { update(); } catch (Throwable ignored) { }
         if (h != null) h.postDelayed(this, 2000);
     }
 
+    /** 每轮自查方向(MIUI 上 onConfigurationChanged 不可靠, 所以轮询):
+     *  竖屏 → 恒显示; 横屏 → 取决于 App 里的"横屏显示"开关。 */
     private void applyOrientation() {
-        boolean land = getResources().getConfiguration().orientation
-                == Configuration.ORIENTATION_LANDSCAPE;
-        hidden = land;
-        if (tv != null) tv.setVisibility(land ? View.GONE : View.VISIBLE);
+        if (tv == null) return;
+        Configuration cfg = getResources().getConfiguration();
+        boolean landscape = cfg.orientation == Configuration.ORIENTATION_LANDSCAPE;
+        boolean shouldHide = landscape && !sp.getBoolean(KEY_LANDSCAPE, true);
+        if (shouldHide == hidden) return;   // 状态没变, 不重复 setVisibility
+        hidden = shouldHide;
+        tv.setVisibility(shouldHide ? View.INVISIBLE : View.VISIBLE);
     }
 
     @Override public void onConfigurationChanged(Configuration c) {
@@ -152,22 +187,16 @@ public class HudService extends Service implements Runnable {
     }
 
     private void update() {
-        // 每轮直接查一次方向: 不依赖 onConfigurationChanged 回调
-        // (Service 的回调在某些 ROM 上不稳定, 自己查最保险)
-        boolean land = getResources().getConfiguration().orientation
-                == Configuration.ORIENTATION_LANDSCAPE;
-        if (land != hidden) applyOrientation();
-        if (hidden) return;
         PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
         if (pm != null && !pm.isInteractive()) return;
 
-        int xd = sp.getInt("xoff", 96);
-        int yd = sp.getInt("yoff", 0);
+        applyOrientation();          // 每轮自查方向(不依赖回调)
+        if (hidden) return;          // 横屏且关掉了横屏显示 → 不读文件、不渲染
+
+        int xd = sp.getInt("xoff", X_CENTER);
+        int yd = sp.getInt("yoff", Y_DEFAULT);
         // 允许从 adb 直接调位置: echo "x y" > /data/local/tmp/k90_hud_pos.txt (单位 dp)
-        //
-        // 优先级按"谁更新"决定，而不是"文件存在就用文件"：
-        // 之前写成"文件存在就覆盖"，结果 App 里拖滑块永远不生效（文件一直在，prefs 被完全忽略）。
-        // 现在比较文件 mtime 与 App 保存时写入的 savedAt，谁新用谁。
+        // 优先级按"谁更新"决定: 比较文件 mtime 与 App 保存时写入的 savedAt, 谁新用谁。
         File pf = new File(POS);
         long prefTs = sp.getLong("savedAt", 0L);
         if (pf.exists() && pf.lastModified() > prefTs) {
@@ -184,17 +213,17 @@ public class HudService extends Service implements Runnable {
                 try { if (pr != null) pr.close(); } catch (Throwable ignored) { }
             }
         }
-        // 防烧屏: 每 JITTER_MS 换一次随机偏移(-3..3 px), 让像素别长期压在同一处
+        // 防烧屏: 每 JITTER_MS 换一次随机偏移(-2..2 px)
         long now = System.currentTimeMillis();
         if (now - lastJitter > JITTER_MS) {
             lastJitter = now;
             jx = rnd.nextInt(JITTER_RANGE * 2 + 1) - JITTER_RANGE;
             jy = rnd.nextInt(JITTER_RANGE * 2 + 1) - JITTER_RANGE;
         }
-        int x = dp(xd) + jx;
+        // X 相对水平中心(可为负=左偏), Y 距顶部(不为负)
+        int x = dp(xd - X_CENTER) + jx;
         int y = dp(yd) + BASE_DY_PX + jy;
         if (y < 0) y = 0;
-        if (x < 0) x = 0;
         if (lp.x != x || lp.y != y) {
             lp.x = x; lp.y = y;
             try { wm.updateViewLayout(tv, lp); } catch (Throwable ignored) { }
@@ -208,15 +237,11 @@ public class HudService extends Service implements Runnable {
             lastText = s;
             tv.setText(s);
         }
-        sLit = rLit; sBig = rBig; sT = rT; sGc = rGc; sMw = rMw; sChg = rChg; sPsi = rPsi;
-        lastShownAt = System.currentTimeMillis();
+        sLit = rLit; sBig = rBig; sT = rT; sGc = rGc; sMw = rMw; sChg = rChg; sPsi = rPsi; sFps = rFps; sRef = rRef; sGpu = rGpu;
+        lastShownAt = now;
     }
 
-    /**
-     * 读模块写的 "<超大核kHz> <小核kHz> <温度m℃>"，排版成 "2.34G/1.12G 39°"。
-     * 排版放在 App 侧做的原因: 模块少做取模拼接, 也能随时改显示格式而不用动 shell。
-     */
-    /** 读一行 "<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <功耗mW>" 到 r* 字段 */
+    /** 读一行 "<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <功耗mW> <充电> <PSI> <帧率> <刷新率> <GPU占用%>" 到 r* 字段 */
     private boolean readRaw() {
         File f = new File(STATE);
         if (!f.exists()) return false;
@@ -236,6 +261,9 @@ public class HudService extends Service implements Runnable {
             rMw  = p.length > 4 ? Integer.parseInt(p[4]) : 0;
             rChg = p.length > 5 ? Integer.parseInt(p[5]) : 0;   // 1 = 正在充电
             rPsi = p.length > 6 ? Integer.parseInt(p[6]) : 0;   // CPU 压力 avg10, %
+            rFps = p.length > 7 ? Integer.parseInt(p[7]) : 0;   // 屏幕合成帧率, 静止=0
+            rRef = p.length > 8 ? Integer.parseInt(p[8]) : 0;   // 面板刷新率 Hz, 0=节点不存在
+            rGpu = p.length > 9 ? Integer.parseInt(p[9]) : 0;   // GPU 占用 %, 静止=0(v1.8.1 新增第10字段)
             return rBig > 0;
         } catch (Throwable e) {
             return false;
@@ -243,17 +271,6 @@ public class HudService extends Service implements Runnable {
             try { if (r != null) r.close(); } catch (Throwable ignored) { }
         }
     }
-
-    /** 变化够不够大到值得重画 */
-
-
-
-
-
-
-
-
-
 
     /** 把本次采样压进环形缓冲 */
     private void pushSample() {
@@ -272,6 +289,7 @@ public class HudService extends Service implements Runnable {
         return b[n / 2];
     }
 
+    /** 变化够不够大到值得重画 */
     private boolean changedEnough() {
         if (lastText.isEmpty()) return true;
         if (Math.abs(rLit - sLit) >= TH_FREQ) return true;
@@ -281,23 +299,31 @@ public class HudService extends Service implements Runnable {
         if (Math.abs(rMw - sMw) >= TH_PWR) return true;
         if (rChg != sChg) return true;
         if (Math.abs(rPsi - sPsi) >= 2) return true;
+        if (Math.abs(rFps - sFps) >= 2) return true;
+        if (rRef != sRef) return true;
+        if (Math.abs(rGpu - sGpu) >= TH_GPU_USE) return true;
         return System.currentTimeMillis() - lastShownAt >= HEARTBEAT_MS;
     }
 
-    /** 排版: CPU: 性能核/超大核  GPU: xxx  TEMP: 39℃  PWR: 1.2W */
+    /** 排版: CPU: 性能核/能效核/占用%  GPU: 频率/占用%  TEMP: 39℃  PWR: 1.2W  FPS: -/120Hz
+     *  CPU 占用复用 PSI(/proc/pressure/cpu avg10 = 最近10s 在等 CPU 的时间占比), 不额外采样。 */
     private String render() {
-        // 频率/GPU 取中位数做平滑; 温度、功耗变化本来就慢, 直接用最新值(否则会滞后 20 秒)
         int lit = median(hLit), big = median(hBig), t = rT;
         int gc = median(hGc), mw = rMw;
         StringBuilder sb = new StringBuilder(48);
         sb.append("CPU: ").append(fmtFreq(lit)).append('/').append(fmtFreq(big));
-        sb.append("  PSI: ").append(rPsi).append('%');
-        if (gc > 0) sb.append("  GPU: ").append(fmtMhz(gc));
-        sb.append("  TEMP: ").append(t / 1000).append("\u2103");
-        // 恒显示: 满电/涓流时 current_now 会读到 0, 一隐藏整段宽度就会跳, 看着像坏了
-        // 默认是"耗电"(放电)值，不带符号；充电时在数值后面加 "+" 区分
-        sb.append("  PWR: ").append(fmtW(mw));
+        sb.append('/').append(rPsi).append('%');
+        if (gc > 0) {
+            sb.append(" GPU: ").append(fmtMhz(gc)).append('/').append(rGpu).append('%');
+        }
+        sb.append(" TEMP: ").append(t / 1000).append("\u2103");
+        sb.append(" PWR: ").append(fmtW(mw));
         if (rChg > 0) sb.append('+');
+        if (rRef > 0) {
+            sb.append(" FPS: ");
+            if (rFps > 0) sb.append(rFps); else sb.append('-');
+            sb.append('/').append(rRef).append("Hz");
+        }
         return sb.toString();
     }
 
@@ -311,7 +337,7 @@ public class HudService extends Service implements Runnable {
         return mhz + "M";
     }
 
-    /** 功耗: 4700mW -> "4.7W"; 22mW -> "22mW"（不足 1W 用 mW，避免一直显示 0.0W） */
+    /** 功耗: 4700mW -> "4.7W"; 22mW -> "22mW" */
     private String fmtW(int mw) {
         if (mw < 1000) return mw + "mW";
         return (mw / 1000) + "." + ((mw % 1000) / 100) + "W";
@@ -321,7 +347,7 @@ public class HudService extends Service implements Runnable {
     private String fmtFreq(int khz) {
         if (khz >= 1000000) {
             int i = khz / 1000000;
-            int d = (khz % 1000000) / 10000;      // 两位小数
+            int d = (khz % 1000000) / 10000;
             return i + "." + (d < 10 ? "0" + d : String.valueOf(d)) + "G";
         }
         return (khz / 1000) + "M";
@@ -336,7 +362,7 @@ public class HudService extends Service implements Runnable {
         }
         return new Notification.Builder(this, CH)
                 .setContentTitle("状态栏 HUD")
-                .setContentText("正在状态栏显示实时频率/温度")
+                .setContentText("正在屏幕顶部居中显示实时频率/温度")
                 .setSmallIcon(android.R.drawable.ic_menu_info_details)
                 .setOngoing(true)
                 .build();
@@ -349,6 +375,7 @@ public class HudService extends Service implements Runnable {
     @Override public void onDestroy() {
         if (h != null) h.removeCallbacks(this);
         try { if (wm != null && tv != null) wm.removeView(tv); } catch (Throwable ignored) { }
+        stopForeground(true);
         super.onDestroy();
     }
 }
