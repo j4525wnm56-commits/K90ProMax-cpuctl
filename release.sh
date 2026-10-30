@@ -44,7 +44,7 @@ git tag -f -a "$VER" -m "$MSG" >/dev/null 2>&1
 git -c credential.helper= push -f "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "refs/tags/$VER" 2>&1 | tail -1
 
 echo "[4/4] 建 Release 并上传资产"
-REPO="$REPO" GH_TOKEN="$GH_TOKEN" VER="$VER" MSG="$MSG" ZIP="$ZIP" python3 - <<'PY'
+REPO="$REPO" GH_TOKEN="$GH_TOKEN" VER="$VER" MSG="$MSG" ZIP="$ZIP" APK="K90HUD.apk" python3 - <<'PY'
 import json, os, time, urllib.error, urllib.request
 
 repo  = os.environ["REPO"]
@@ -82,34 +82,41 @@ if rel is None or "id" not in rel:
         {"name": f"{ver} {msg}".strip(), "body": msg}).encode(), "PATCH")
 
 rid = rel["id"]
-# 同名资产先删掉，否则上传会 422 already_exists
-# 注意删除用的是 /releases/assets/<id>，不是 /releases/<rid>/assets/<id>（后者 404）
-for a in call(f"/repos/{repo}/releases/{rid}/assets") or []:
-    if a["name"] == name:
-        call(f"/repos/{repo}/releases/assets/{a['id']}", method="DELETE")
-        print("  已删除旧同名资产")
-        time.sleep(2)
+ZIP, APK = os.environ["ZIP"], os.environ.get("APK", "")
+assets = [(os.path.basename(ZIP), ZIP, "application/zip")]
+# 模块包里自带 K90HUD.apk，同时作为独立资产发出，方便只想要状态栏 HUD 的人直接装
+if APK and os.path.exists(APK):
+    assets.append((f"K90HUD-{ver}.apk", APK, "application/vnd.android.package-archive"))
 
-data = open(zip_path, "rb").read()
-url = f"https://uploads.github.com/repos/{repo}/releases/{rid}/assets?name={name}"
-# 刚删完同名资产时 GitHub 会短暂占用这个名字（422 already_exists），重试几次即可
-for attempt in range(1, 7):
-    req = urllib.request.Request(
-        url, data=data,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/zip"},
-        method="POST")
-    try:
-        with urllib.request.urlopen(req) as r:
-            a = json.load(r)
-        break
-    except urllib.error.HTTPError as e:
-        if e.code == 422 and attempt < 6:
-            time.sleep(3)
-            continue
-        raise
-else:
-    raise SystemExit("资产上传失败")
+for nm, path, ctype in assets:
+    # 同名资产先删掉，否则上传会 422 already_exists
+    # 注意删除用的是 /releases/assets/<id>，不是 /releases/<rid>/assets/<id>（后者 404）
+    for a in call(f"/repos/{repo}/releases/{rid}/assets") or []:
+        if a["name"] == nm:
+            call(f"/repos/{repo}/releases/assets/{a['id']}", method="DELETE")
+            print("  已删除旧同名资产:", nm)
+            time.sleep(2)
 
-print("  资产:", a["name"], a["size"], "bytes")
-print("  下载:", a["browser_download_url"])
+    data = open(path, "rb").read()
+    url = f"https://uploads.github.com/repos/{repo}/releases/{rid}/assets?name={nm}"
+    # 刚删完同名资产时 GitHub 会短暂占用这个名字（422 already_exists），重试几次即可
+    for attempt in range(1, 7):
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": ctype},
+            method="POST")
+        try:
+            with urllib.request.urlopen(req) as r:
+                a = json.load(r)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 422 and attempt < 6:
+                time.sleep(3)
+                continue
+            raise
+    else:
+        raise SystemExit("资产上传失败: " + nm)
+
+    print("  资产:", a["name"], a["size"], "bytes")
+    print("    ", a["browser_download_url"])
 PY
