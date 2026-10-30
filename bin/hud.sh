@@ -81,9 +81,20 @@ sample_freq() {
     BIG=$lastv; LIT=${first:-$lastv}
 }
 
-# 温度: 要读 21 个 zone, 是采样里最贵的一块。温度变化慢, 循环里隔轮读一次就够。
+# 温度: 要读 21 个 zone。温度变化很慢(实测相邻 5s 差 0.1~1℃), 所以**每 30 秒读一次**,
+# 其余轮次沿用上次值(CT_HOLD)。配合 App 侧的中位数平滑, 显示完全不会跳。
+# 用累计秒数 tick 判定, 与 hud_interval 设置无关(间隔 1s 或 5s 都是准确的 30 秒)。
+# TEMP_INTERVAL 可用环境变量覆盖; TEMP_FULL=1 强制每轮都读(仅测试用)。
+TEMP_INTERVAL=${TEMP_INTERVAL:-30}
+CT=0
+CT_HOLD=0
 sample_temp() {
     local z v
+    if [ "${TEMP_FULL:-0}" != "1" ] && [ "$CT_HOLD" != "0" ] \
+       && [ $(( tick % TEMP_INTERVAL )) -ne 0 ]; then
+        CT=$CT_HOLD
+        return 0
+    fi
     CT=0
     [ -s "$TZ_LIST" ] || return 0
     while read -r z; do
@@ -91,35 +102,42 @@ sample_temp() {
         is_num "$v" || continue
         [ "$v" -gt "$CT" ] && CT=$v
     done < "$TZ_LIST"
+    CT_HOLD=$CT
+    return 0
 }
 
 # GPU 温度 + 占用百分比
 # gpu_busy_percentage 是高通 KGSL 节点, 返回 "16 %" 这种。
 # 【坑1·解析】不能用 ${RV//[^0-9]/}: 设备的 /system/bin/sh(mksh) 不支持 [^0-9] 否定字符类,
 #   实测 "13 %" 会被解析成 " %"(数字反被删掉) -> 恒 0。改用 ${raw%% *} 截到第一个空格, 得 "13"。
-# 【坑2·命中率】这是短统计窗口的瞬时值, 静止/窗口复位时读到 0。守护每 5s 才采一次,
-#   单次读大概率撞 0。实测: 无间隔连读12次取最大, 6轮里3轮仍为0;
-#   间隔0.05s连读6次取最大, 负载下稳定命中(16%)。故每轮间隔连读 6 次取最大。
-#   只在亮屏采样的那一瞬间发生(约0.3s/5s), 不影响息屏/深睡, 开销可忽略。
+# 【坑2·节点语义】它是 KGSL 的**异步统计快照**: 内核约 5 秒才更新一次, 非 0 值只存在极短时间。
+#   实测(真游戏 Unity 渲染下): 单次读约 40% 为非 0; 但**按守护的 5s 节奏单次读 8/8 全命中**
+#   (24/29/18/21/21/27/22/26%)。所以单次读就够, 不必连读。
+# 【性能】曾用"间隔 0.05s 连读 6 次取最大"提命中率, 那是**性能退化**:
+#   设备上 sleep 0.05 真实耗时 69ms/次(不是 50ms), 5 次 = 345ms/轮,
+#   采样总耗时从 ~30ms 涨到 347ms/轮(占空比 6.9%), 命中率却没明显提升。
+#   现改为单次读 + 保持上次非零值(最多 2 轮), 开销 0.01ms/轮。
 GB=0
+GB_HOLD=0      # 上次读到的非零占用
+GB_HOLD_N=0    # 还能保持几轮
 sample_gputherm() {
-    local v raw i mx
+    local v raw
     if [ -e "$KGSL/temp" ]; then
         rdg "$KGSL/temp";      v=$RV; is_num "$v" && GT=$v
     fi
     if [ -e "$KGSL/gpu_busy_percentage" ]; then
-        mx=0; i=0
-        while [ "$i" -lt 6 ]; do
-            rdg "$KGSL/gpu_busy_percentage"; raw=$RV
-            v=${raw%% *}                       # "16 %" -> "16"
-            is_num "$v" || v=0
-            [ "$v" -gt "$mx" ] && mx=$v
-            [ "$i" -lt 5 ] && sleep 0.05       # 前5次读后等窗口刷新, 最后一次不等
-            i=$((i + 1))
-        done
-        GB=$mx
+        rdg "$KGSL/gpu_busy_percentage"; raw=$RV
+        v=${raw%% *}                       # "16 %" -> "16"
+        is_num "$v" || v=0
+        if [ "$v" -gt 0 ]; then
+            GB=$v; GB_HOLD=$v; GB_HOLD_N=2   # 读到真实值, 重新开始保持
+        elif [ "$GB_HOLD_N" -gt 0 ]; then
+            GB=$GB_HOLD; GB_HOLD_N=$((GB_HOLD_N - 1))
+        else
+            GB=0
+        fi
     else
-        GB=0
+        GB=0; GB_HOLD=0; GB_HOLD_N=0
     fi
     return 0
 }
@@ -139,13 +157,19 @@ sample_psi() {
 
 # 实时帧率 + 面板刷新率 (高通 SM8850 实测)
 # 帧率: /sys/class/drm/card0-sde-crtc-0/measured_fps -> "fps: 60.5 duration:... frame_count:..."
-#   这是 DRM CRTC 的真实画面合成帧率: 屏幕静止无新帧时=0, 滑动/游戏/动画时才跳到几十。
-#   注意它反映的是"屏幕这一秒画了多少帧", 不是某个 App 的内部 FPS。
+#   这是 DRM CRTC 的**画面合成帧率**: 屏幕静止无新帧时=0, 有动画/游戏时才跳到几十。
+# 【坑·统计窗口】fps_periodicity_ms 是内核统计窗口(ms), 可写。实测(真游戏 Unity 渲染):
+#     1000 → 读数稳定 39~41  (帧间隔直方图显示真实提交间隔 24ms → 41.7fps ✓)
+#     200  → 读数在 26~116 间剧烈跳动(窗口太小, 采样不稳)
+#     50/100 → 读数 0~119 剧烈跳动
+#   所以用 1000(内核默认): 稳定。虽然它统计的是"有新内容提交的帧", 游戏锁 40fps 时就显示 40。
+#   想要"应用真实渲染帧率"用 sample_app_fps() 走 SurfaceFlinger, 更准但更贵(低频采样)。
 # 刷新率: /sys/class/mi_display/disp-DSI-0/hw_vsync_info -> "fps: 120.109 vsync_period_ns:..."
 #   这是面板实测刷新率(硬件 vsync), 比 dynamic_fps(配置目标值)更准。
 # 各 1 次 read, 纯参数展开解析, 零 fork。节点不存在时自动探测备选路径。
 FPS=0; REF=0
 FPS_NODE=""; REF_NODE=""
+FPS_PERIOD=1000
 probe_fps_nodes() {
     local c
     for c in /sys/class/drm/card0-sde-crtc-0/measured_fps \
@@ -173,6 +197,65 @@ sample_fps() {
     fi
     return 0
 }
+
+# ---------- 应用真实渲染帧率(SurfaceFlinger, 低频) ----------
+# 为什么需要: 内核 measured_fps 统计的是"CRTC 提交的帧", 遇到 SurfaceView 直通的游戏会漏计,
+#   实测同一个游戏: 内核节点读 36~56 跳动, 而 SF 的 per-layer averageFPS 稳定 125.000。
+# 【方案: 全局 totalFrames 差分】不判断前台包名, 直接用 SF 的全局帧计数:
+#   totalFrames 是**从上次 dump 起新提交的帧数**, statsEnd 是当前时间戳。
+#   两次 dump 的差值 ÷ 时间差 = 全局实际帧率(实测 373帧/3秒 = 124fps, 与 per-layer 125 一致)。
+#   dumpsys SurfaceFlinger --timestats -dump 约 30ms, 每 10 秒一次(占空比 0.3%)。
+# 输出: APP_FPS = 差分算出的帧率; 取不到时为 0(回退到内核 measured_fps)。
+APP_FPS=0
+APP_FPS_HOLD=0
+# 前一次 dump 的 totalFrames / statsEnd, 用于差分
+APP_FPS_PREV_TF=0
+APP_FPS_PREV_TS=0
+# 采样间隔(秒)。设 APP_FPS_ENABLED=0 可完全关闭(退回内核合成帧率)。
+APP_FPS_ENABLED=${APP_FPS_ENABLED:-1}
+APP_FPS_INTERVAL=${APP_FPS_INTERVAL:-10}
+APP_FPS_ENABLED_STATE=0
+TS_DUMP=/data/local/tmp/k90_ts.txt
+
+sample_app_fps() {
+    local tf ts dt df v
+    APP_FPS=0
+    [ "${APP_FPS_ENABLED:-0}" = "1" ] || { APP_FPS=$APP_FPS_HOLD; return 0; }
+    # totalFrames 只在 --timestats -enable 时才累积(实测: 不 enable 时恒定不变,
+    # enable 后每 3 秒涨 367 帧 = 122fps)。所以首次调用要先 enable。
+    if [ "$APP_FPS_ENABLED_STATE" != "1" ]; then
+        dumpsys SurfaceFlinger --timestats -enable >/dev/null 2>&1
+        APP_FPS_ENABLED_STATE=1
+        sleep 1
+    fi
+    dumpsys SurfaceFlinger --timestats -dump > "$TS_DUMP" 2>/dev/null
+    [ -s "$TS_DUMP" ] || return 0
+    # 顶层 totalFrames / statsEnd (第一处即是全局统计)
+    tf=$(awk '/^totalFrames = /{print $3; exit}' "$TS_DUMP" 2>/dev/null)
+    ts=$(awk '/^statsEnd = /{print $3; exit}' "$TS_DUMP" 2>/dev/null)
+    if [ -n "$tf" ] && [ -n "$ts" ] && [ "$APP_FPS_PREV_TF" != "0" ] && [ -n "$APP_FPS_PREV_TS" ]; then
+        dt=$(( ts - APP_FPS_PREV_TS ))
+        df=$(( tf - APP_FPS_PREV_TF ))
+        if [ "$dt" -gt 0 ] && [ "$df" -ge 0 ]; then
+            # statsEnd 是 Unix 秒级时间戳, dt 就是秒数; df 是帧数 -> 帧率 = df/dt
+            v=$(( df / dt ))
+            [ "$v" -gt 0 ] && { APP_FPS=$v; APP_FPS_HOLD=$v; }
+        fi
+    fi
+    APP_FPS_PREV_TF=$tf
+    APP_FPS_PREV_TS=$ts
+    return 0
+}
+
+# 守护退出时关掉 timestats 统计(否则 SurfaceFlinger 会一直记直方图, 占内存)
+app_fps_disable() {
+    [ "$APP_FPS_ENABLED_STATE" = "1" ] || return 0
+    dumpsys SurfaceFlinger --timestats -disable >/dev/null 2>&1
+    APP_FPS_ENABLED_STATE=0
+    rm -f "$TS_DUMP"
+    return 0
+}
+
 sample_refresh() {
     local ln n int
     REF=0
@@ -228,7 +311,8 @@ sample_batt() {
 
 # 全量采样(once / post / bench 用)
 sample() {
-    BIG=0; LIT=0; CT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0; PSI=0; FPS=0; REF=0
+    BIG=0; LIT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0; PSI=0; FPS=0; REF=0
+    # CT 不在这里清零: 温度按 TEMP_INTERVAL(默认30s) 分级采样时要沿用上次值, 由 sample_temp 管理
     sample_freq
     sample_gpuclk
     sample_temp
@@ -237,6 +321,12 @@ sample() {
     sample_psi
     sample_fps
     sample_refresh
+    # 应用真实帧率: 每 10 秒才跑一次 SurfaceFlinger(约20ms开销), 其余轮沿用缓存
+    if [ $(( tick % APP_FPS_INTERVAL )) -eq 0 ]; then
+        sample_app_fps
+    fi
+    # 优先用 SF 的应用帧率; 取不到就用内核的合成帧率
+    if [ "$APP_FPS" -gt 0 ]; then FPS=$APP_FPS; fi
     return 0
 }
 
@@ -360,6 +450,7 @@ case "$1" in
         e=$(date +%s%3N)
         echo "纯采样 50 轮: 总 $(($e - $s))ms, 平均 $(( (e - s) / 50 )) ms/轮"
         echo "温度源 $(wc -l < "$TZ_LIST") 个 zone"
+        echo "温度采样间隔: ${TEMP_INTERVAL}s (TEMP_FULL=1 强制每轮都读)"
         sample; render_post
         echo "样例:"; cat "$STATE/hud_last.txt" 2>/dev/null
         ;;
@@ -369,9 +460,11 @@ case "$1" in
         # 所有数据(含帧率/刷新率)统一每 hud_interval(默认 5s)全量采样一次。
         # 之前试过 0.1s 高频刷 FPS, 守护 CPU 冲到 3.45% 单核(5s 档仅 0.30%, 差 11.5 倍),
         # 且高频唤醒阻碍 CPU 深睡, 实测开销太大 —— 退回统一 5s。
-        # 高通 DRM 统计窗口 fps_periodicity_ms 一并恢复内核默认 1000ms。
+        # 高通 DRM 统计窗口 fps_periodicity_ms 用 1000ms(内核默认)。
+        # 注意: 这个内核节点统计的是"CRTC 提交的帧", 遇 SurfaceView 直通的游戏会漏计,
+        # 真正准确的帧率由 sample_app_fps() 从 SurfaceFlinger 取(见该函数注释)。
         FPERIOD=/sys/class/drm/card0-sde-crtc-0/fps_periodicity_ms
-        [ -e "$FPERIOD" ] && echo 1000 > "$FPERIOD" 2>/dev/null
+        [ -e "$FPERIOD" ] && echo "$FPS_PERIOD" > "$FPERIOD" 2>/dev/null
         while :; do
             rdg "$STATE/hud_enabled"; [ "$RV" = "1" ] || break
             rdg "$STATE/hud_interval"; iv=$RV; is_num "$iv" || iv=5
@@ -390,6 +483,8 @@ case "$1" in
             [ $((tick % 3000)) -eq 0 ] && snooze_alert
             sleep "$iv"; tick=$((tick + iv))
         done
+        # 退出时关掉 SurfaceFlinger 的 timestats 统计(它会一直累积直方图, 占内存)
+        app_fps_disable
         rm -rf "$STATE/hud.lock"
         ;;
     *)

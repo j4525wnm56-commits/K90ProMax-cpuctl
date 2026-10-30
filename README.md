@@ -396,12 +396,13 @@ CPU: 883M/1.55G PSI: 44% GPU: 539M TEMP: 41℃ PWR: 0.9W FPS: 60/120Hz
 - 不读 sysfs、**不要 root**，只轮询模块写的 `/data/local/tmp/k90_hud.txt`
 - 一行 10 个整数 `<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <mW> <充电> <PSI%> <帧率> <刷新率Hz> <GPU占用%>`，排版在 App 侧做
 - **显示格式（v1.8.1）**：`CPU: 性能核/能效核/占用%  GPU: 频率/占用%  TEMP: 39℃  PWR: 1.2W  FPS: 119/120Hz`。CPU 占用复用 PSI（`/proc/pressure/cpu` avg10 = 最近 10s 在等 CPU 的时间占比），不额外采样
-- **GPU 占用**取自高通 KGSL `gpu_busy_percentage`。踩过两个坑：①设备 `/system/bin/sh`(mksh) **不支持 `${v//[^0-9]/}` 否定字符类**，`"16 %"` 会被解析成 `" %"`（数字反被删）→ 恒 0；改用 `${raw%% *}` 截空格。②该节点是**短统计窗口的瞬时值**，单次读大概率撞 0 → 改成**间隔 0.05s 连读 6 次取最大值**，负载下稳定命中（实测 16%）
+- **GPU 占用**取自高通 KGSL `gpu_busy_percentage`。踩过两个坑：①设备 `/system/bin/sh`(mksh) **不支持 `${v//[^0-9]/}` 否定字符类**，`"16 %"` 会被解析成 `" %"`（数字反被删）→ 恒 0；改用 `${raw%% *}` 截空格。②该节点是**异步统计快照**（内核约 5s 才更新一次），单次读有时为 0 → 改为**单次读 + 保持上次非零值（最多 2 轮）**。实测真游戏负载下每 5s 采样 8/8 全部命中（16%~30%）
+- **帧率取自 SurfaceFlinger**（v1.8.1 起）。内核 `measured_fps` 节点统计的是"CRTC 提交的帧"，遇到 SurfaceView 直通的游戏会**漏计**（同一个游戏：内核读 36~56 跳动，SF 读 125 稳定）。做法：`dumpsys SurfaceFlinger --timestats -dump` 取全局 `totalFrames` 与 `statsEnd`，**差分算帧率**（不判断前台包名）。注意 `totalFrames` **必须先 `--timestats -enable` 才会累积**（实测：不 enable 时恒定不变，enable 后每 3s 涨 367 帧 = 122fps）。采样每 10 秒一次（约 30ms，占空比 0.3%），守护退出时 `-disable` 清理
 - **v1.7.1 起默认顶部水平居中**（`Gravity.CENTER_HORIZONTAL|TOP`）：X = 相对屏幕水平中心的偏移（300=正中），Y = 距顶部距离（0=贴顶，正好落在挖孔上方的空白带，不被遮挡）。竖屏恒定显示；**横屏是否显示可在 App 里单独开关**（不依赖 `onConfigurationChanged`，MIUI 上不可靠，改每 2s 自轮询方向）
 - **v1.8.0 起 App 的"开启/关闭悬浮窗"是真正的启停**：关闭会写 `hud_on=false`，`HudService` 读到后 `stopSelf()` 且返回 `START_NOT_STICKY`，连开机 `service.sh` 的强制拉起也不会复活；再点开启才恢复
 - 位置可调：`echo "300 0" > /data/local/tmp/k90_hud_pos.txt`（X=300 正中，Y=0 贴顶；单位 dp，2 秒生效）；App 里拖滑块同样有效，两者按"谁更新"决定
 - 防烧屏：每 10 分钟随机偏移 ±2px
-- 息屏不刷新；App 每 2s 读一次状态文件（模块每 5s 全量采样一次）——0.1s 高频档因开销过大已回退
+- 息屏不刷新；App 每 2s 读一次状态文件（模块每 5s 全量采样一次）——0.1s 高频档因开销过大已回退。App 侧用**文件 mtime 门控**：状态文件没变就跳过解析（模块 5s 写一次，App 2s 轮询，多数轮次可省）
 - **状态文件是覆盖写**（`printf ... > file`），恒定几十字节，不会无限增长
 - 默认**黑字 + 60% 半透明白底衬**：白底 App 上底衬隐形、深色壁纸上托住黑字
 
@@ -451,7 +452,10 @@ cd overlay && ./build.sh      # aapt2 + javac + d8 + zipalign + apksigner
 | 想跟着系统状态栏图标黑白自动变色 | 做不到。这版 HyperOS 的 `dumpsys` **不输出 `appearance` 字段**，只能靠截屏猜像素（`screencap` 一次 211ms），代价远超收益。已放弃，改用默认黑字 |
 | `d8` 编译带内部类的 class 崩 | 本机 `d8 8.2.2` 遇 `InnerClasses` 属性 NPE（JDK 21 也一样）。代码里禁用 lambda / 匿名内部类 |
 | 屏幕一直刷新、怎么都不息屏 | 三个叠加原因：①**之前测 0.1s 高频 FPS 时留下的 `input swipe` 后台脚本没退出**（在 `/proc/<pid>/cmdline` 里能直接看到），它持续滑动造帧，屏幕永远被判为"有活动"；②`stay_on_while_plugged_in=15`（插电常亮）；③调频档位本身在跑、CPU 一直有负载。排查顺序：先 `ps -A | grep input swipe` 看有没有残留滑动进程，再看 `dumpsys power` 的 `mWakefulness`，最后才动调频模块 |
-| GPU 占用恒为 0（v1.8.1） | 两个独立坑：①设备 `/system/bin/sh`(mksh) **不支持 `${v//[^0-9]/}`** —— `[^0-9]` 被当成字面字符集，`"16 %"` 解析成 `" %"`，数字反被删掉。改用 `${raw%% *}` 截空格；②`gpu_busy_percentage` 是**短统计窗口瞬时值**，单次读大概率撞 0（实测连读 12 次仍有 3/6 轮为 0）。改成间隔 0.05s 连读 6 次取最大值，负载下稳定命中 |
+| GPU 占用恒为 0（v1.8.1） | 两个独立坑：①设备 `/system/bin/sh`(mksh) **不支持 `${v//[^0-9]/}`** —— `[^0-9]` 被当成字面字符集，`"16 %"` 解析成 `" %"`，数字反被删掉。改用 `${raw%% *}` 截空格；②`gpu_busy_percentage` 是**异步统计快照**（内核约 5s 更新一次），单次读有时为 0 → 改为「单次读 + 保持上次非零值（最多 2 轮）」 |
+| 帧率显示比游戏内低一半 | 内核 `measured_fps` 统计的是 **CRTC 提交的帧**，SurfaceView 直通渲染的游戏（Unity 等）**不走 CRTC 计数**，会大量漏计。同一个游戏实测：内核读 36~56 乱跳，SurfaceFlinger per-layer `averageFPS` 稳定 125。改用 `dumpsys SurfaceFlinger --timestats -dump` 的全局 `totalFrames` 做**差分**（不判断前台包名）。两个坑：①`totalFrames` **必须先 `--timestats -enable` 才会累积**（不 enable 时恒定不变）；②`statsEnd` 是**秒级**时间戳，帧率 = Δframes / Δ秒，别乘错 100 倍 |
+| 采样开销从 7ms 涨到 347ms/轮 | 自作聪明用「间隔 0.05s 连读 6 次取最大值」提高 GPU 命中率。设备上 **`sleep 0.05` 真实耗时 69ms**（不是 50ms），5 次 = 345ms/轮，占空比 6.9%。而实测证明单次读配合「保持上次非零值」命中率一样高。**采样里加 sleep 是这个脚本的大忌** |
+| 温度采样占九成开销 | 21 个 thermal zone 全读 = ~2ms/轮，其实不大；真正该分级的是**变化慢**的项。温度改成**每 30 秒读一次**（用累计秒数 `tick % 30` 判定，与 `hud_interval` 设置无关），其余轮沿用上次值，配合 App 侧中位数平滑，显示不跳 |
 | 悬浮窗开关按钮点了没反应 | 原按钮只会 `startForegroundService`，**从来没有实现"关闭"**（`HudService` 也没记录用户意图）。v1.8.0 起写入持久化 `hud_on` 偏好：`HudService` 在 `onCreate`/`onStartCommand` 读到 `false` 就 `stopSelf()` + 返回 `START_NOT_STICKY`，连开机 `service.sh` 的强制拉起也不会复活 |
 | 重启 HUD 守护后起不来 | `hud.lock/pid` 残留 + `pkill` 后没等进程真死，`hud_run.sh` 的 `mkdir` 原子锁就失败即退出。重启流程要：杀进程 → **等它真的消失** → `rm -rf` 锁目录 → `mkdir` 锁 → `nohup sh hud.sh loop &` → `echo $! > 锁/pid`（少了 `mkdir` 会写不进 pid 文件） |
 

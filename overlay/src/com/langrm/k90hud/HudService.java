@@ -94,6 +94,10 @@ public class HudService extends Service implements Runnable {
     private int hIdx = 0, hCnt = 0;
     /** 当前是否因"横屏 + 关掉了横屏显示"被隐藏 */
     private boolean hidden = false;
+    /** 状态文件的 mtime: 没变就跳过解析(模块 5s 写一次, App 2s 轮询一次, 多数轮次可省) */
+    private long lastStateMtime = 0;
+    /** 是否已经成功解析过至少一次(首轮不能跳过) */
+    private boolean haveParsed = false;
     private final java.util.Random rnd = new java.util.Random();
     private long lastJitter = 0;
     private int jx = 0;
@@ -241,10 +245,16 @@ public class HudService extends Service implements Runnable {
         lastShownAt = now;
     }
 
-    /** 读一行 "<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <功耗mW> <充电> <PSI> <帧率> <刷新率> <GPU占用%>" 到 r* 字段 */
+    /** 读一行 "<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <功耗mW> <充电> <PSI> <帧率> <刷新率> <GPU占用%>" 到 r* 字段
+     *  性能: 模块每 5s 才写一次文件, 这里 2s 轮询一次, 所以有 60% 的轮次是白读。
+     *  用 mtime 门控 —— 文件没变就直接返回 false(不解析不重画), 省掉 open+read+split+parse。
+     *  注意: 返回 false 会让 update() 提前返回, 但位置更新在 readRaw 之前, 不受影响。 */
     private boolean readRaw() {
         File f = new File(STATE);
         if (!f.exists()) return false;
+        long mt = f.lastModified();
+        if (mt == lastStateMtime && haveParsed) return false;   // 文件没更新, 跳过
+        lastStateMtime = mt;
         BufferedReader r = null;
         try {
             r = new BufferedReader(new FileReader(f));
@@ -264,6 +274,7 @@ public class HudService extends Service implements Runnable {
             rFps = p.length > 7 ? Integer.parseInt(p[7]) : 0;   // 屏幕合成帧率, 静止=0
             rRef = p.length > 8 ? Integer.parseInt(p[8]) : 0;   // 面板刷新率 Hz, 0=节点不存在
             rGpu = p.length > 9 ? Integer.parseInt(p[9]) : 0;   // GPU 占用 %, 静止=0(v1.8.1 新增第10字段)
+            haveParsed = true;
             return rBig > 0;
         } catch (Throwable e) {
             return false;

@@ -53,26 +53,41 @@ v1.7.1 起坐标语义：**X = 相对屏幕水平中心的偏移（300=正中，
 
 （"自动跟随背景变色"已放弃，原因见下节。）
 
-## 显示内容（v1.2）
+## 显示内容（v1.8.2）
 
 ```
-CPU: 883M/691M  GPU: 539M  TEMP: 39℃  PWR: 0.3W
-└─┬─┘ └──┬──┘   └──┬──┘   └──┬──┘   └──┬──┘
-  │      │          │         │         └─ 整机功耗（电池 current×voltage）
-  │      │          │         └─────────── CPU 最高温（21 个 cpu* zone 取最大）
-  │      │          └───────────────────── GPU 频率（kgsl clock_mhz）
-  │      └──────────────────────────────── 性能核 cpu0-5 / 超大核 cpu6-7
-  └─────────────────────────────────────── 标签缩写，中文版太宽（占满半屏）故弃用
+CPU: 883M/691M/12%  GPU: 539M/28%  TEMP: 39℃  PWR: 0.3W  FPS: 119/120Hz
 ```
+
+| 段 | 含义 |
+|---|---|
+| `CPU: 性能核/能效核/占用%` | 频率取自各簇 `scaling_cur_freq`；占用 = PSI（`/proc/pressure/cpu` avg10，最近 10s 在等 CPU 的时间占比） |
+| `GPU: 频率/占用%` | 频率取自 kgsl `clock_mhz`；占用取自 `gpu_busy_percentage`（0 时不显示括号） |
+| `TEMP` | 21 个 `cpu*` thermal zone 取最大（排除 `*trip*` 硬件跳闸阈值） |
+| `PWR` | 整机功耗 = 电池 `current_now × voltage_now`（µV×µA=pW，÷1e9 才是 mW）；充电时数值后加 `+` |
+| `FPS` | **SurfaceFlinger 全局帧率**（见下节），分母是面板实测刷新率 `hw_vsync_info` |
 
 - 刷新 **5 秒**一次（`cpuctl hud interval <秒>` 可改 1–60；0.1s 高频档因开销过大已回退）
 - 整体**下移 3px**；每 **10 分钟**随机偏移 ±2px 防烧屏
-- 横屏、竖屏都显示（不再横屏隐藏），始终顶部水平居中
+- 竖屏恒定显示；横屏是否显示可在 App 里单独开关
+
+### 帧率为什么不用内核 `measured_fps`
+
+内核 `/sys/class/drm/card0-sde-crtc-0/measured_fps` 统计的是 **CRTC 提交的帧**，
+SurfaceView 直通渲染的游戏（Unity 等）**不走 CRTC 计数**，会大量漏计。
+
+同一个游戏实测：内核节点读 **36~56 乱跳**，SurfaceFlinger 读 **125 稳定**。
+
+现在的做法：模块侧 `dumpsys SurfaceFlinger --timestats -dump` 取全局 `totalFrames` 与
+`statsEnd`，**差分**算帧率（不判断前台包名）。每 10 秒一次（约 30ms），守护退出时 `-disable` 清理。
+
+> `totalFrames` **必须先 `--timestats -enable` 才会累积**（不 enable 时恒定不变）。
+> `statsEnd` 是**秒级**时间戳，帧率 = Δframes / Δ秒。
 
 ## 架构：App 不读 sysfs
 
 ```
-hud.sh (root)  ──写──▶  /data/local/tmp/k90_hud.txt  (5 个整数)
+hud.sh (root)  ──写──▶  /data/local/tmp/k90_hud.txt  (10 个整数)
                                         │
                                         ▼  每 2s 轮询
                               HudService (普通 App, 无 root 权限)
@@ -87,9 +102,9 @@ hud.sh (root)  ──写──▶  /data/local/tmp/k90_hud.txt  (5 个整数)
 
 | 项 | 值 |
 |---|---|
-| 模块侧采样 | **分级采样**：频率+GPU 每 5s，温度/功耗每 10s（21 个 zone 最贵）。实测约 **单核 0.2%** |
-| App 侧 | 每 2s 读一行文本；内容没变不 setText；息屏/横屏跳过。实测 **单核 0.44%** |
-| 内存 | 一个 TextView + 一个前台服务 |
+| 模块侧采样 | 采样一轮 **5ms**（v1.8.2 从 439ms 优化下来）；温度每 30s 分级采样，GPU 占用单次读 + 保持。守护实测 **单核 0.22%** |
+| App 侧 | 每 2s 读一行文本（用**文件 mtime 门控**，文件没变就跳过解析）；内容没变不 setText。实测 **单核 0.13%** |
+| 内存 | 一个 TextView + 一个前台服务（RSS ~170MB 是 ART 运行时基线，与系统进程同量级） |
 
 ## 那条"正在其他应用的上层显示内容"通知
 
