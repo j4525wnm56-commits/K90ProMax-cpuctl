@@ -83,10 +83,12 @@ if rel is None or "id" not in rel:
 
 rid = rel["id"]
 # 同名资产先删掉，否则上传会 422 already_exists
+# 注意删除用的是 /releases/assets/<id>，不是 /releases/<rid>/assets/<id>（后者 404）
 for a in call(f"/repos/{repo}/releases/{rid}/assets") or []:
     if a["name"] == name:
-        call(f"/repos/{repo}/releases/{rid}/assets/{a['id']}", method="DELETE")
+        call(f"/repos/{repo}/releases/assets/{a['id']}", method="DELETE")
         print("  已删除旧同名资产")
+        time.sleep(2)
 
 data = open(zip_path, "rb").read()
 url = f"https://uploads.github.com/repos/{repo}/releases/{rid}/assets?name={name}"

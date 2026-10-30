@@ -125,7 +125,9 @@ sample_batt() {
     rdg "$BATT/temp"; v=$RV
     case "$v" in -*) v=${v#-} ;; esac
     if is_num "$v"; then [ "$v" -lt 1000 ] && v=$((v * 100)); BT=$v; fi
-    MW=$(( (BV * BI) / 1000000 ))
+    # 单位: µV × µA = pW, /1e9 才是 mW。
+    # 旧代码写的 /1e6 得到的是 µW, 却被当 mW 显示 —— 结果大了 1000 倍。
+    MW=$(( (BV * BI) / 1000000000 ))
     [ "$MW" -lt 0 ] && MW=$((0 - MW))
     return 0
 }
