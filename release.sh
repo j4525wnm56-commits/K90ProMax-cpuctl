@@ -65,7 +65,8 @@ def call(url, data=None, method="GET", ctype="application/json"):
         with urllib.request.urlopen(req) as r:
             return json.load(r) if r.length != 0 else {}
     except urllib.error.HTTPError as e:
-        if e.code == 404:
+        # 404: 不存在；422: 已存在（重复发同一版时 GitHub 会给这个）
+        if e.code in (404, 422):
             return None
         raise
 
