@@ -360,6 +360,7 @@ su -c "sh /data/adb/modules/k90_cpuctl/bin/cpuctl restore"   # 命令行
 ![状态栏 HUD](docs/hud-preview.png)
 
 上图上半是白底 App（黑字贴白底，底衬自动隐形），下半是深色桌面（半透明白底衬托住黑字）。
+截图时插着充电器且电量 100%，电池侧电流为 0，所以 `PWR` 显示 `0mW` —— 这是真实值，拔掉充电器就会看到实际功耗。
 
 显示内容：
 
