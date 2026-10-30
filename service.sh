@@ -20,10 +20,26 @@ if [ "$(cat "$STATE/hud_enabled" 2>/dev/null)" = "1" ]; then
     sh "$MODDIR/bin/cpuctl" hud on >/dev/null 2>&1
 fi
 
-# 悬浮窗 App: 模块自带了一份 APK, 没装就装上
-if [ -f "$MODDIR/K90HUD.apk" ] && ! pm list packages 2>/dev/null | grep -q "$PKG"; then
-    pm install -r -g "$MODDIR/K90HUD.apk" >/dev/null 2>&1
-    sleep 2
+# 悬浮窗 App: 模块自带了一份 APK。没装 -> 装; 已装但内容不同(md5) -> 覆盖成模块里这份。
+# 用 md5 而不是 versionCode: 手机上拿不到 APK 的 versionCode(没有 aapt), 但 md5 一条命令就够,
+# 16KB 的文件算一次代价可以忽略。
+if [ -f "$MODDIR/K90HUD.apk" ]; then
+    NEED=0
+    if ! pm list packages 2>/dev/null | grep -q "$PKG"; then
+        NEED=1
+    else
+        CUR=$(dumpsys package "$PKG" 2>/dev/null | sed -n 's/.*codePath=\([^ ]*\).*/\1/p' | head -1)
+        # codePath 是目录(/data/app/~~xxx/包名-yyy)，真正装的文件是它下面的 base.apk
+        [ -n "$CUR" ] && [ -d "$CUR" ] && CUR="$CUR/base.apk"
+        if [ -n "$CUR" ] && [ -f "$CUR" ]; then
+            [ "$(md5sum "$CUR" 2>/dev/null | cut -d' ' -f1)" = \
+              "$(md5sum "$MODDIR/K90HUD.apk" 2>/dev/null | cut -d' ' -f1)" ] || NEED=1
+        fi
+    fi
+    if [ "$NEED" = "1" ]; then
+        pm install -r -g "$MODDIR/K90HUD.apk" >/dev/null 2>&1
+        sleep 2
+    fi
 fi
 
 if pm list packages 2>/dev/null | grep -q "$PKG"; then

@@ -416,6 +416,7 @@ cd overlay && ./build.sh      # aapt2 + javac + d8 + zipalign + apksigner
 | 现象 | 原因 / 解法 |
 |---|---|
 | 温度长年显示 95℃ | `cpu-hw-trip-0/1` 报的是**硬件跳闸阈值**（固定 95000），不是温度，筛 zone 时要排除 `*trip*` |
+| 刷入新模块包但 App 还是旧的 | `service.sh` 现在比对「已装 `base.apk` 的 md5」与「模块内 `K90HUD.apk` 的 md5」，不一致就自动覆盖安装（v1.6.1 起）。注意 `codePath` 是**目录**，真正要算的是它下面的 `base.apk` |
 | 重装 APK 后悬浮窗消失 | `pm install -r` 会把 `SYSTEM_ALERT_WINDOW` 重置成 `ignore`：窗口在（`dumpsys window` 能看到）但 `mAppOpVisibility=false`。必须 `install → 等 1s → appops set → 启动` |
 | 通知栏多一条划不掉的"正在其他应用的上层显示内容" | AOSP `AlertWindowNotification`（`pkg=android`，ONGOING）。没有系统开关，只能 `cmd notification snooze`，`hud.sh` 每 50 分钟续期 |
 | 守护被强杀后再也起不来 | `hud.lock` 残留导致 `mkdir` 失败即退出。改为先判 pid 存活，死了就清锁 |
