@@ -365,9 +365,14 @@ su -c "sh /data/adb/modules/k90_cpuctl/bin/cpuctl restore"   # 命令行
 显示内容：
 
 ```
-CPU: 883M/1.55G  GPU: 539M  TEMP: 41℃  PWR: 0.9W
-     │            │         │         └─ 整机功耗（电池 current × voltage）
-     │            │         │            默认显示"耗电"；充电时后面加 "+"，如 PWR: 5.8W+
+CPU: 883M/1.55G  PSI: 44%  GPU: 539M  TEMP: 41℃  PWR: 0.9W
+     │            │        │         │         └─ 整机功耗（电池 current × voltage）
+     │            │        │         │            默认显示"耗电"；充电时后面加 "+"，如 PWR: 5.8W+
+     │            │        │         └────────── CPU 最高温（21 个 cpu* zone 取最大）
+     │            │        └──────────────────── GPU 频率（kgsl clock_mhz）
+     │            └───────────────────────────── CPU 压力（/proc/pressure/cpu avg10，
+     │                                            最近 10s 有百分之几的时间在等调度；
+     │                                            比频率更能说明"真在满载/卡顿"）
      │            │         └─────────── CPU 最高温（21 个 cpu* zone 取最大）
      │            └───────────────────── GPU 频率（kgsl clock_mhz）
      └────────────────────────────────── 性能核 cpu0-5 / 超大核 cpu6-7

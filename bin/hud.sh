@@ -68,7 +68,7 @@ build_tz_list() {
 }
 
 # ---------- 采样(零 fork) ----------
-BIG=0; LIT=0; CT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0
+BIG=0; LIT=0; CT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0; PSI=0
 # 频率: 每轮都读(2 个文件, ~0.5ms)。BIG = 最后一个 policy(超大核簇), LIT = 第一个(小核簇)
 sample_freq() {
     local id v first="" lastv=""
@@ -103,6 +103,19 @@ sample_gputherm() {
         GB=${RV//[^0-9]/}
         is_num "$GB" || GB=0
     fi
+    return 0
+}
+
+# CPU 压力 (PSI): /proc/pressure/cpu 的 avg10, 表示最近 10 秒里有百分之几的时间
+# 在等 CPU —— 比"频率高"更能说明"真在满载/卡顿"。1 次读, 纯参数展开解析, 零 fork。
+PSI=0
+sample_psi() {
+    local a
+    read -r _ a _ < /proc/pressure/cpu 2>/dev/null
+    a=${a#avg10=}
+    a=${a%.*}
+    case "$a" in ''|*[!0-9]*) a=0 ;; esac
+    PSI=$a
     return 0
 }
 
@@ -141,7 +154,7 @@ sample_batt() {
 
 # 全量采样(once / post / bench 用)
 sample() {
-    BIG=0; LIT=0; CT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0
+    BIG=0; LIT=0; CT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0; PSI=0
     sample_freq
     sample_gpuclk
     sample_temp
@@ -176,6 +189,7 @@ CPU ${F1}℃"
     fi
     [ "$CHG" = "1" ] && pw="${pw}+"
     body="$body · $pw"
+    body="$body · PSI ${PSI}%"
     [ -n "$prof" ] && body="$body · $prof"
     # 只留悬浮窗时把通知关掉(hud_notify=0), 但采样和写文件不能停
     [ "$notify" != "0" ] && cmd notification post -S bigtext -t "$title" "$TAG" "$body" >/dev/null 2>&1
@@ -185,10 +199,10 @@ CPU ${F1}℃"
 # 写给状态栏悬浮窗 App 的紧凑串(它没有 root, 读不了 sysfs, 只能读这个文件)。
 # 用 printf 内建重定向, 不 fork。文件在 /data/local/tmp, 对普通 app 可读(0644)。
 HUD_FILE=/data/local/tmp/k90_hud.txt
-# 格式: "<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <功耗mW> <是否充电1/0>"，排版交给 App。
+# 格式: "<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <功耗mW> <是否充电1/0> <PSI%>"，排版交给 App。
 # 只写 3 个整数: 不用取模拼小数, 也方便 App 用 split 解析。
 write_state() {
-    printf '%d %d %d %d %d %d\n' "$BIG" "$LIT" "$CT" "$GC" "$MW" "$CHG" > "$HUD_FILE" 2>/dev/null
+    printf '%d %d %d %d %d %d %d\n' "$BIG" "$LIT" "$CT" "$GC" "$MW" "$CHG" "$PSI" > "$HUD_FILE" 2>/dev/null
 }
 
 # AOSP 的 AlertWindowNotification: 只要 App 在别的应用上层画窗口, WMS 就发一条
@@ -279,6 +293,7 @@ case "$1" in
             fi
             # ---- 分级采样: 频率每轮, 温度隔轮, GPU/电池仅通知模式 ----
             sample_freq
+            sample_psi
             sample_gpuclk
             if [ $((tick % 4)) -eq 0 ] || [ "$CT" = "0" ]; then sample_temp; sample_batt; fi
             rdg "$STATE/hud_notify"; notify=${RV:-1}
