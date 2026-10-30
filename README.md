@@ -367,6 +367,7 @@ su -c "sh /data/adb/modules/k90_cpuctl/bin/cpuctl restore"   # 命令行
 ```
 CPU: 883M/1.55G  GPU: 539M  TEMP: 41℃  PWR: 0.9W
      │            │         │         └─ 整机功耗（电池 current × voltage）
+     │            │         │            默认显示"耗电"；充电时后面加 "+"，如 PWR: 5.8W+
      │            │         └─────────── CPU 最高温（21 个 cpu* zone 取最大）
      │            └───────────────────── GPU 频率（kgsl clock_mhz）
      └────────────────────────────────── 性能核 cpu0-5 / 超大核 cpu6-7
@@ -384,7 +385,7 @@ CPU: 883M/1.55G  GPU: 539M  TEMP: 41℃  PWR: 0.9W
 
 - 不读 sysfs、**不要 root**，只轮询模块写的 `/data/local/tmp/k90_hud.txt`
 - 一行 5 个整数 `<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <mW>`，排版在 App 侧做
-- 位置可调：`echo "48 5" > /data/local/tmp/k90_hud_pos.txt`（单位 dp，2 秒生效）
+- 位置可调：`echo "48 5" > /data/local/tmp/k90_hud_pos.txt`（单位 dp，2 秒生效）；App 里拖滑块同样有效，两者按"谁更新"决定
 - 防烧屏：每 10 分钟随机偏移 ±2px
 - 横屏隐藏、息屏不刷新
 - 默认**黑字 + 60% 半透明白底衬**：白底 App 上底衬隐形、深色壁纸上托住黑字
@@ -418,6 +419,7 @@ cd overlay && ./build.sh      # aapt2 + javac + d8 + zipalign + apksigner
 |---|---|
 | 温度长年显示 95℃ | `cpu-hw-trip-0/1` 报的是**硬件跳闸阈值**（固定 95000），不是温度，筛 zone 时要排除 `*trip*` |
 | PWR 一直显示 0 / 数值大得离谱 | 两个原因：① 满电充电时 `current_now` 读成 0，本来 `if (mw>0)` 会把整段吞掉（已改为恒显示）；② `µV × µA` 得到的是 **pW**，要 `/1e9` 才是 mW，旧代码 `/1e6` 得 µW 却当 mW 用，**大了 1000 倍** |
+| App 里拖滑块不生效 | 原来只要 `/data/local/tmp/k90_hud_pos.txt` 存在就无条件覆盖，App 存的偏好永远读不到。改成比较**文件 mtime** 与 App 保存时的 `savedAt`，谁新用谁（v1.6.3） |
 | 刷入新模块包但 App 还是旧的 | `service.sh` 现在比对「已装 `base.apk` 的 md5」与「模块内 `K90HUD.apk` 的 md5」，不一致就自动覆盖安装（v1.6.1 起）。注意 `codePath` 是**目录**，真正要算的是它下面的 `base.apk` |
 | 重装 APK 后悬浮窗消失 | `pm install -r` 会把 `SYSTEM_ALERT_WINDOW` 重置成 `ignore`：窗口在（`dumpsys window` 能看到）但 `mAppOpVisibility=false`。必须 `install → 等 1s → appops set → 启动` |
 | 通知栏多一条划不掉的"正在其他应用的上层显示内容" | AOSP `AlertWindowNotification`（`pkg=android`，ONGOING）。没有系统开关，只能 `cmd notification snooze`，`hud.sh` 每 50 分钟续期 |

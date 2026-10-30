@@ -15,7 +15,7 @@ rm -f "$OUT"
 # 不进 zip 的东西：仓库元数据、文档、构建脚本本身
 EXCLUDES=(
   '.git/*' '*.zip' 'dist/*' '*.md' '*.png'
-  '.gitignore' '.gitattributes' 'package.sh' 'update.json' 'LICENSE'
+  '.gitignore' '.gitattributes' 'package.sh' 'release.sh' 'update.json' 'LICENSE'
   'overlay/*' 'docs/*' '*.jks' '*.keystore'
 )
 

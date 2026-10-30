@@ -68,7 +68,7 @@ build_tz_list() {
 }
 
 # ---------- 采样(零 fork) ----------
-BIG=0; LIT=0; CT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0
+BIG=0; LIT=0; CT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0
 # 频率: 每轮都读(2 个文件, ~0.5ms)。BIG = 最后一个 policy(超大核簇), LIT = 第一个(小核簇)
 sample_freq() {
     local id v first="" lastv=""
@@ -117,10 +117,17 @@ sample_gpuclk() {
 # 电池功耗: current_now × voltage_now, 变化慢, 隔轮读
 sample_batt() {
     local v
-    BI=0; BV=0; BT=0; MW=0
+    BI=0; BV=0; BT=0; MW=0; CHG=0
     rdg "$BATT/current_now"; v=$RV
-    case "$v" in -*) v=${v#-} ;; esac
+    # 正电流 = 电流流向电池(充电), 负电流 = 放电。CHG 只用来给 App 加 "+" 后缀。
+    case "$v" in
+        -*) v=${v#-} ;;
+        *)  if is_num "$v" && [ "$v" -gt 0 ]; then CHG=1; fi ;;
+    esac
     is_num "$v" && BI=$v
+    # 满电时 current_now 会一直是 0，光看电流判断不出"插着充电器"，所以再看一眼 status
+    rdg "$BATT/status"
+    case "$RV" in Charg*|Full) CHG=1 ;; esac
     rdg "$BATT/voltage_now"; v=$RV; is_num "$v" && BV=$v
     rdg "$BATT/temp"; v=$RV
     case "$v" in -*) v=${v#-} ;; esac
@@ -134,7 +141,7 @@ sample_batt() {
 
 # 全量采样(once / post / bench 用)
 sample() {
-    BIG=0; LIT=0; CT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0
+    BIG=0; LIT=0; CT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0
     sample_freq
     sample_gpuclk
     sample_temp
@@ -170,10 +177,10 @@ CPU ${F1}℃"
 # 写给状态栏悬浮窗 App 的紧凑串(它没有 root, 读不了 sysfs, 只能读这个文件)。
 # 用 printf 内建重定向, 不 fork。文件在 /data/local/tmp, 对普通 app 可读(0644)。
 HUD_FILE=/data/local/tmp/k90_hud.txt
-# 格式: "<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <功耗mW>"，排版交给 App。
+# 格式: "<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <功耗mW> <是否充电1/0>"，排版交给 App。
 # 只写 3 个整数: 不用取模拼小数, 也方便 App 用 split 解析。
 write_state() {
-    printf '%d %d %d %d %d\n' "$BIG" "$LIT" "$CT" "$GC" "$MW" > "$HUD_FILE" 2>/dev/null
+    printf '%d %d %d %d %d %d\n' "$BIG" "$LIT" "$CT" "$GC" "$MW" "$CHG" > "$HUD_FILE" 2>/dev/null
 }
 
 # AOSP 的 AlertWindowNotification: 只要 App 在别的应用上层画窗口, WMS 就发一条
