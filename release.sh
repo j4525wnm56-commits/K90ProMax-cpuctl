@@ -44,79 +44,84 @@ git tag -f -a "$VER" -m "$MSG" >/dev/null 2>&1
 git -c credential.helper= push -f "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "refs/tags/$VER" 2>&1 | tail -1
 
 echo "[4/4] 建 Release 并上传资产"
-REPO="$REPO" GH_TOKEN="$GH_TOKEN" VER="$VER" MSG="$MSG" ZIP="$ZIP" APK="K90HUD.apk" python3 - <<'PY'
-import json, os, time, urllib.error, urllib.request
+# 【坑】这里必须用 curl, 不能用 python urllib ——
+#   urllib 不读 http_proxy/https_proxy 环境变量(要显式 ProxyHandler),
+#   直连 api.github.com 会被墙, 表现为 404/None, 最后报
+#   "TypeError: 'NoneType' object is not subscriptable"。
+#   curl 会自动读这些环境变量, 走代理就正常了。
+REPO="$REPO" VER="$VER" MSG="$MSG" ZIP="$ZIP" bash -c '
+set -euo pipefail
+REPO="$REPO"; VER="$VER"; MSG="$MSG"; ZIP="$ZIP"
+NAME=$(basename "$ZIP")
+H=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
 
-repo  = os.environ["REPO"]
-token = os.environ["GH_TOKEN"]
-ver   = os.environ["VER"]
-msg   = os.environ["MSG"]
-zip_path = os.environ["ZIP"]
-name  = os.path.basename(zip_path)
-H = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+# 建 Release; 已存在就复用
+RESP=$(curl -s -w "\n%{http_code}" -X POST "${H[@]}" -H "Content-Type: application/json" \
+  --data-binary "$(python3 -c "
+import json,sys
+print(json.dumps({\"tag_name\": sys.argv[1], \"name\": sys.argv[2], \"body\": sys.argv[3]}))
+" "$VER" "$VER $MSG" "$MSG")" \
+  "https://api.github.com/repos/$REPO/releases")
+CODE=$(printf "%s" "$RESP" | tail -1)
+BODY=$(printf "%s" "$RESP" | sed "\$d")
+if [ "$CODE" != "201" ]; then
+  echo "  创建返回 HTTP=$CODE, 尝试复用已存在的 Release"
+  BODY=$(curl -s "${H[@]}" "https://api.github.com/repos/$REPO/releases/tags/$VER")
+fi
+RID=$(printf "%s" "$BODY" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get(\"id\",\"\"))")
+[ -n "$RID" ] || { echo "  拿不到 Release id, 放弃"; exit 1; }
+echo "  Release id = $RID"
 
+# 上传资产(同名先删, GitHub 会短暂占用名字, 重试)
+upload() {
+  local nm="$1" path="$2" ctype="$3"
+  local aid
+  aid=$(curl -s "${H[@]}" "https://api.github.com/repos/$REPO/releases/$RID/assets" | \
+    python3 -c "
+import json,sys
+try:
+    for a in json.load(sys.stdin):
+        if a[\"name\"]==sys.argv[1]: print(a[\"id\"]); break
+except Exception: pass
+" "$nm")
+  if [ -n "$aid" ]; then
+    echo "  删除旧同名资产 id=$aid"
+    curl -s -X DELETE "${H[@]}" "https://api.github.com/repos/$REPO/releases/assets/$aid" -o /dev/null
+    sleep 3
+  fi
+  for i in 1 2 3 4 5; do
+    local c
+    c=$(curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: $ctype" \
+      --data-binary "@$path" -w "%{http_code}" -o /tmp/_rel_asset.json \
+      "https://uploads.github.com/repos/$REPO/releases/$RID/assets?name=$nm")
+    if [ "$c" = "201" ]; then
+      python3 -c "
+import json
+d=json.load(open(\"/tmp/_rel_asset.json\"))
+print(\"  资产:\", d[\"name\"], d[\"size\"], \"bytes\")
+print(\"    \", d[\"browser_download_url\"])
+"
+      rm -f /tmp/_rel_asset.json
+      return 0
+    fi
+    echo "  第 $i 次 HTTP=$c, 重试..."
+    head -c 200 /tmp/_rel_asset.json 2>/dev/null; echo
+    sleep 3
+  done
+  echo "  上传失败: $nm"; return 1
+}
 
-def call(url, data=None, method="GET", ctype="application/json"):
-    h = dict(H)
-    if data is not None:
-        h["Content-Type"] = ctype
-    req = urllib.request.Request("https://api.github.com" + url, data=data, headers=h, method=method)
-    try:
-        with urllib.request.urlopen(req) as r:
-            return json.load(r) if r.length != 0 else {}
-    except urllib.error.HTTPError as e:
-        # 404: 不存在；422: 已存在（重复发同一版时 GitHub 会给这个）
-        if e.code in (404, 422):
-            return None
-        raise
+upload "$NAME" "$ZIP" "application/zip"
+[ -f K90HUD.apk ] && upload "K90HUD-${VER}.apk" "K90HUD.apk" "application/vnd.android.package-archive"
 
-
-# 建 release；已存在就复用（重复发同一版时不会 422 中断）
-rel = call(f"/repos/{repo}/releases", json.dumps(
-    {"tag_name": ver, "name": f"{ver} {msg}".strip(), "body": msg}).encode(), "POST")
-if rel is None or "id" not in rel:
-    rel = call(f"/repos/{repo}/releases/tags/{ver}")
-    print("  Release 已存在，复用 id", rel["id"])
-    # 让标题/说明与本次一致
-    call(f"/repos/{repo}/releases/{rel['id']}", json.dumps(
-        {"name": f"{ver} {msg}".strip(), "body": msg}).encode(), "PATCH")
-
-rid = rel["id"]
-ZIP, APK = os.environ["ZIP"], os.environ.get("APK", "")
-assets = [(os.path.basename(ZIP), ZIP, "application/zip")]
-# 模块包里自带 K90HUD.apk，同时作为独立资产发出，方便只想要状态栏 HUD 的人直接装
-if APK and os.path.exists(APK):
-    assets.append((f"K90HUD-{ver}.apk", APK, "application/vnd.android.package-archive"))
-
-for nm, path, ctype in assets:
-    # 同名资产先删掉，否则上传会 422 already_exists
-    # 注意删除用的是 /releases/assets/<id>，不是 /releases/<rid>/assets/<id>（后者 404）
-    for a in call(f"/repos/{repo}/releases/{rid}/assets") or []:
-        if a["name"] == nm:
-            call(f"/repos/{repo}/releases/assets/{a['id']}", method="DELETE")
-            print("  已删除旧同名资产:", nm)
-            time.sleep(2)
-
-    data = open(path, "rb").read()
-    url = f"https://uploads.github.com/repos/{repo}/releases/{rid}/assets?name={nm}"
-    # 刚删完同名资产时 GitHub 会短暂占用这个名字（422 already_exists），重试几次即可
-    for attempt in range(1, 7):
-        req = urllib.request.Request(
-            url, data=data,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": ctype},
-            method="POST")
-        try:
-            with urllib.request.urlopen(req) as r:
-                a = json.load(r)
-            break
-        except urllib.error.HTTPError as e:
-            if e.code == 422 and attempt < 6:
-                time.sleep(3)
-                continue
-            raise
-    else:
-        raise SystemExit("资产上传失败: " + nm)
-
-    print("  资产:", a["name"], a["size"], "bytes")
-    print("    ", a["browser_download_url"])
-PY
+echo ""
+echo "=== Release 状态 ==="
+curl -s "${H[@]}" "https://api.github.com/repos/$REPO/releases/tags/$VER" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(\"  链接:\", d[\"html_url\"])
+for a in d[\"assets\"]:
+    print(f\"    {a[\"name\"]:<32} {a[\"size\"]:>8} bytes\")
+"
+rm -f /tmp/_rel_asset.json
+'
