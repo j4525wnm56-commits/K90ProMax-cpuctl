@@ -45,7 +45,7 @@ git -c credential.helper= push -f "https://x-access-token:${GH_TOKEN}@github.com
 
 echo "[4/4] 建 Release 并上传资产"
 REPO="$REPO" GH_TOKEN="$GH_TOKEN" VER="$VER" MSG="$MSG" ZIP="$ZIP" python3 - <<'PY'
-import json, os, urllib.error, urllib.request
+import json, os, time, urllib.error, urllib.request
 
 repo  = os.environ["REPO"]
 token = os.environ["GH_TOKEN"]
@@ -89,13 +89,25 @@ for a in call(f"/repos/{repo}/releases/{rid}/assets") or []:
         print("  已删除旧同名资产")
 
 data = open(zip_path, "rb").read()
-req = urllib.request.Request(
-    f"https://uploads.github.com/repos/{repo}/releases/{rid}/assets?name={name}",
-    data=data,
-    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/zip"},
-    method="POST")
-with urllib.request.urlopen(req) as r:
-    a = json.load(r)
+url = f"https://uploads.github.com/repos/{repo}/releases/{rid}/assets?name={name}"
+# 刚删完同名资产时 GitHub 会短暂占用这个名字（422 already_exists），重试几次即可
+for attempt in range(1, 7):
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/zip"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req) as r:
+            a = json.load(r)
+        break
+    except urllib.error.HTTPError as e:
+        if e.code == 422 and attempt < 6:
+            time.sleep(3)
+            continue
+        raise
+else:
+    raise SystemExit("资产上传失败")
+
 print("  资产:", a["name"], a["size"], "bytes")
 print("  下载:", a["browser_download_url"])
 PY
