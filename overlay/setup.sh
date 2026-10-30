@@ -34,13 +34,19 @@ fi
 
 echo "[1/4] 安装 APK"
 "$ADB" -s "$D" install -r "$APK"
+# install 完成后要等一下, 否则紧接着的 appops/启动会撞上包替换过程
+sleep 2
 
 echo "[2/4] 授予悬浮窗权限"
+# install -r 会把 SYSTEM_ALERT_WINDOW 重置成 ignore(窗口在但完全不显示), 必须补
 "$ADB" -s "$D" shell "su -c 'appops set $PKG SYSTEM_ALERT_WINDOW allow'" 2>/dev/null \
- || "$ADB" -s "$D" shell "appops set $PKG SYSTEM_ALERT_WINDOW allow" 2>/dev/null || true
+    || "$ADB" -s "$D" shell "appops set $PKG SYSTEM_ALERT_WINDOW allow" 2>/dev/null || true
 
 echo "[3/4] 授予通知权限"
 "$ADB" -s "$D" shell "pm grant $PKG android.permission.POST_NOTIFICATIONS" 2>/dev/null || true
+
+# 若用户之前在 App 里关过悬浮窗(hud_on=false), 服务会自杀、起不来 -> 显式打开
+"$ADB" -s "$D" shell "su -c \"sed -i 's|name=hud_on value=\\\"false\\\"|name=hud_on value=\\\"true\\\"|' /data/data/$PKG/shared_prefs/hud.xml\"" 2>/dev/null || true
 
 echo "[4/4] 拉起悬浮窗服务"
 if ! "$ADB" -s "$D" shell "am start-foreground-service -n $PKG/.HudService" 2>&1 | grep -qi "error\|exception"; then
@@ -48,6 +54,15 @@ if ! "$ADB" -s "$D" shell "am start-foreground-service -n $PKG/.HudService" 2>&1
 else
     echo "  直接启动被拒(后台限制), 改为打开 App 让用户点一下"
     "$ADB" -s "$D" shell "am start -n $PKG/.MainActivity" >/dev/null 2>&1 || true
+fi
+
+sleep 2
+# 验证悬浮窗真的在(权限没补上时窗口数会是 0)
+NWIN=$("$ADB" -s "$D" shell "dumpsys window windows | grep -c package=$PKG" 2>/dev/null | tr -d '\r\n ')
+if [ "${NWIN:-0}" -gt 0 ]; then
+    echo "  悬浮窗已就位"
+else
+    echo "  ⚠️ 悬浮窗没起来: 多半是 SYSTEM_ALERT_WINDOW 权限被重置, 手动开一次「K90 HUD」App 授权即可"
 fi
 
 sleep 2
