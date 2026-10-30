@@ -16,6 +16,7 @@ rm -f "$OUT"
 EXCLUDES=(
   '.git/*' '*.zip' 'dist/*' '*.md' '*.png'
   '.gitignore' '.gitattributes' 'package.sh' 'update.json' 'LICENSE'
+  'overlay/*' 'docs/*' '*.jks' '*.keystore'
 )
 
 if command -v zip >/dev/null 2>&1; then
