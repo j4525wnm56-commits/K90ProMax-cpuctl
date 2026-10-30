@@ -70,8 +70,8 @@ public class HudService extends Service implements Runnable {
     private SharedPreferences sp;
     private String lastText = "";
     // 最近一次读到的原始值 / 最近一次真正显示的原始值
-    private int rLit, rBig, rT, rGc, rMw;
-    private int sLit, sBig, sT, sGc, sMw;
+    private int rLit, rBig, rT, rGc, rMw, rChg;
+    private int sLit, sBig, sT, sGc, sMw, sChg;
     private long lastShownAt = 0;
     private GradientDrawable pillBg;
     private final int[] hLit = new int[SMOOTH_N];
@@ -164,9 +164,13 @@ public class HudService extends Service implements Runnable {
         int xd = sp.getInt("xoff", 96);
         int yd = sp.getInt("yoff", 0);
         // 允许从 adb 直接调位置: echo "x y" > /data/local/tmp/k90_hud_pos.txt (单位 dp)
-        // 这样不用打开 App 拖滑块, 我在这边改完立刻能看到效果
+        //
+        // 优先级按"谁更新"决定，而不是"文件存在就用文件"：
+        // 之前写成"文件存在就覆盖"，结果 App 里拖滑块永远不生效（文件一直在，prefs 被完全忽略）。
+        // 现在比较文件 mtime 与 App 保存时写入的 savedAt，谁新用谁。
         File pf = new File(POS);
-        if (pf.exists()) {
+        long prefTs = sp.getLong("savedAt", 0L);
+        if (pf.exists() && pf.lastModified() > prefTs) {
             BufferedReader pr = null;
             try {
                 pr = new BufferedReader(new FileReader(pf));
@@ -204,7 +208,7 @@ public class HudService extends Service implements Runnable {
             lastText = s;
             tv.setText(s);
         }
-        sLit = rLit; sBig = rBig; sT = rT; sGc = rGc; sMw = rMw;
+        sLit = rLit; sBig = rBig; sT = rT; sGc = rGc; sMw = rMw; sChg = rChg;
         lastShownAt = System.currentTimeMillis();
     }
 
@@ -230,6 +234,7 @@ public class HudService extends Service implements Runnable {
             rT   = Integer.parseInt(p[2]);
             rGc  = p.length > 3 ? Integer.parseInt(p[3]) : 0;
             rMw  = p.length > 4 ? Integer.parseInt(p[4]) : 0;
+            rChg = p.length > 5 ? Integer.parseInt(p[5]) : 0;   // 1 = 正在充电
             return rBig > 0;
         } catch (Throwable e) {
             return false;
@@ -273,6 +278,7 @@ public class HudService extends Service implements Runnable {
         if (Math.abs(rT - sT) >= TH_TEMP) return true;
         if (Math.abs(rGc - sGc) >= TH_GPU) return true;
         if (Math.abs(rMw - sMw) >= TH_PWR) return true;
+        if (rChg != sChg) return true;
         return System.currentTimeMillis() - lastShownAt >= HEARTBEAT_MS;
     }
 
@@ -285,7 +291,10 @@ public class HudService extends Service implements Runnable {
         sb.append("CPU: ").append(fmtFreq(lit)).append('/').append(fmtFreq(big));
         if (gc > 0) sb.append("  GPU: ").append(fmtMhz(gc));
         sb.append("  TEMP: ").append(t / 1000).append("\u2103");
-        if (mw > 0) sb.append("  PWR: ").append(fmtW(mw));
+        // 恒显示: 满电/涓流时 current_now 会读到 0, 一隐藏整段宽度就会跳, 看着像坏了
+        // 默认是"耗电"(放电)值，不带符号；充电时在数值后面加 "+" 区分
+        sb.append("  PWR: ").append(fmtW(mw));
+        if (rChg > 0) sb.append('+');
         return sb.toString();
     }
 
@@ -299,8 +308,9 @@ public class HudService extends Service implements Runnable {
         return mhz + "M";
     }
 
-    /** 功耗: 4700mW -> "4.7W" */
+    /** 功耗: 4700mW -> "4.7W"; 22mW -> "22mW"（不足 1W 用 mW，避免一直显示 0.0W） */
     private String fmtW(int mw) {
+        if (mw < 1000) return mw + "mW";
         return (mw / 1000) + "." + ((mw % 1000) / 100) + "W";
     }
 

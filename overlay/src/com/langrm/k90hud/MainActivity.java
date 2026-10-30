@@ -70,14 +70,15 @@ public class MainActivity extends Activity
         tvPos.setPadding(0, dp(22), 0, dp(4));
         root.addView(tvPos);
 
+        int[] cur = readPos();
         sx = new SeekBar(this);
         sx.setMax(600);
-        sx.setProgress(sp.getInt("xoff", 96));
+        sx.setProgress(cur[0]);
         sx.setOnSeekBarChangeListener(this);
 
         sy = new SeekBar(this);
         sy.setMax(120);
-        sy.setProgress(sp.getInt("yoff", 0));
+        sy.setProgress(cur[1]);
         sy.setOnSeekBarChangeListener(this);
 
         updatePosLabel(sx.getProgress(), sy.getProgress());
@@ -113,7 +114,11 @@ public class MainActivity extends Activity
     }
 
     @Override public void onProgressChanged(SeekBar s, int v, boolean fromUser) {
-        sp.edit().putInt("xoff", sx.getProgress()).putInt("yoff", sy.getProgress()).apply();
+        // savedAt 让 HudService 知道"App 这边的设置比 adb 文件更新"，否则滑块永远不生效
+        sp.edit().putInt("xoff", sx.getProgress())
+                .putInt("yoff", sy.getProgress())
+                .putLong("savedAt", System.currentTimeMillis())
+                .apply();
         updatePosLabel(sx.getProgress(), sy.getProgress());
     }
 
@@ -134,6 +139,24 @@ public class MainActivity extends Activity
         lp.topMargin = dp(10);
         btn.setLayoutParams(lp);
         return btn;
+    }
+
+    /** 读 /data/local/tmp/k90_hud_pos.txt（若比 App 存的更新），否则用 App 存的 */
+    private int[] readPos() {
+        int x = sp.getInt("xoff", 96), y = sp.getInt("yoff", 0);
+        try {
+            java.io.File f = new java.io.File("/data/local/tmp/k90_hud_pos.txt");
+            if (f.exists() && f.lastModified() > sp.getLong("savedAt", 0L)) {
+                java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(f));
+                String ln = r.readLine();
+                r.close();
+                if (ln != null) {
+                    String[] a = ln.trim().split("\\s+");
+                    if (a.length >= 2) { x = Integer.parseInt(a[0]); y = Integer.parseInt(a[1]); }
+                }
+            }
+        } catch (Throwable ignored) { }
+        return new int[]{x, y};
     }
 
     private int dp(int v) {
