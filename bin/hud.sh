@@ -155,7 +155,8 @@ render_post() {
     local title body prof mw g f notify
     rdg "$STATE/hud_notify"; notify=${RV:-1}
     rdg "$STATE/profile"; prof=$RV
-    mw=$(( (BV * BI) / 1000000 ))
+    # MW 由 sample_batt 算好(单位 mW)，别再自己除一遍 —— 旧代码这里写的 /1e6 是 µW，会大 1000 倍
+    mw=$MW
     fmt2 "$BIG"; g=$F2
     fmt1 "$CT";  f=$F1
     title="CPU ${g}G · ${f}℃"
@@ -167,7 +168,14 @@ render_post() {
 CPU ${F1}℃"
     if [ "$GT" -gt 0 ]; then fmt1 "$GT"; body="$body · GPU ${F1}℃"; fi
     if [ "$BT" -gt 0 ]; then fmt1 "$BT"; body="$body · 电池 ${F1}℃"; fi
-    if [ "$mw" -gt 0 ]; then fmt1 "$mw"; body="$body · ${F1}W"; fi
+    # 功耗段恒显示(与状态栏一致); 充电时 "+" 只贴在数值后面, 不能挂在温度后面
+    if [ "$mw" -ge 1000 ]; then
+        fmt1 "$mw"; pw="${F1}W"
+    else
+        pw="${mw}mW"
+    fi
+    [ "$CHG" = "1" ] && pw="${pw}+"
+    body="$body · $pw"
     [ -n "$prof" ] && body="$body · $prof"
     # 只留悬浮窗时把通知关掉(hud_notify=0), 但采样和写文件不能停
     [ "$notify" != "0" ] && cmd notification post -S bigtext -t "$title" "$TAG" "$body" >/dev/null 2>&1
