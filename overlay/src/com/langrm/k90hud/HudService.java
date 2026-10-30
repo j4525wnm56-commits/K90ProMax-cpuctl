@@ -70,8 +70,8 @@ public class HudService extends Service implements Runnable {
     private SharedPreferences sp;
     private String lastText = "";
     // 最近一次读到的原始值 / 最近一次真正显示的原始值
-    private int rLit, rBig, rT, rGc, rMw, rChg;
-    private int sLit, sBig, sT, sGc, sMw, sChg;
+    private int rLit, rBig, rT, rGc, rMw, rChg, rPsi;
+    private int sLit, sBig, sT, sGc, sMw, sChg, sPsi;
     private long lastShownAt = 0;
     private GradientDrawable pillBg;
     private final int[] hLit = new int[SMOOTH_N];
@@ -208,7 +208,7 @@ public class HudService extends Service implements Runnable {
             lastText = s;
             tv.setText(s);
         }
-        sLit = rLit; sBig = rBig; sT = rT; sGc = rGc; sMw = rMw; sChg = rChg;
+        sLit = rLit; sBig = rBig; sT = rT; sGc = rGc; sMw = rMw; sChg = rChg; sPsi = rPsi;
         lastShownAt = System.currentTimeMillis();
     }
 
@@ -235,6 +235,7 @@ public class HudService extends Service implements Runnable {
             rGc  = p.length > 3 ? Integer.parseInt(p[3]) : 0;
             rMw  = p.length > 4 ? Integer.parseInt(p[4]) : 0;
             rChg = p.length > 5 ? Integer.parseInt(p[5]) : 0;   // 1 = 正在充电
+            rPsi = p.length > 6 ? Integer.parseInt(p[6]) : 0;   // CPU 压力 avg10, %
             return rBig > 0;
         } catch (Throwable e) {
             return false;
@@ -279,6 +280,7 @@ public class HudService extends Service implements Runnable {
         if (Math.abs(rGc - sGc) >= TH_GPU) return true;
         if (Math.abs(rMw - sMw) >= TH_PWR) return true;
         if (rChg != sChg) return true;
+        if (Math.abs(rPsi - sPsi) >= 2) return true;
         return System.currentTimeMillis() - lastShownAt >= HEARTBEAT_MS;
     }
 
@@ -289,6 +291,7 @@ public class HudService extends Service implements Runnable {
         int gc = median(hGc), mw = rMw;
         StringBuilder sb = new StringBuilder(48);
         sb.append("CPU: ").append(fmtFreq(lit)).append('/').append(fmtFreq(big));
+        sb.append("  PSI: ").append(rPsi).append('%');
         if (gc > 0) sb.append("  GPU: ").append(fmtMhz(gc));
         sb.append("  TEMP: ").append(t / 1000).append("\u2103");
         // 恒显示: 满电/涓流时 current_now 会读到 0, 一隐藏整段宽度就会跳, 看着像坏了
