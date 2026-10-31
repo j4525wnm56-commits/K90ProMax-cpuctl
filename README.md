@@ -394,13 +394,59 @@ CPU: 883M/1.55G PSI: 44% GPU: 539M TEMP: 41℃ PWR: 0.9W FPS: 60/120Hz
 `overlay/` 是配套的极简 App（`com.langrm.k90hud`，16KB）：
 
 - 不读 sysfs、**不要 root**，只轮询模块写的 `/data/local/tmp/k90_hud.txt`
-- 一行 10 个整数 `<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <mW> <充电> <PSI%> <帧率> <刷新率Hz> <GPU占用%>`，排版在 App 侧做
-- **显示格式（v1.8.1）**：`CPU: 性能核/能效核/占用%  GPU: 频率/占用%  TEMP: 39℃  PWR: 1.2W  FPS: 119/120Hz`。CPU 占用复用 PSI（`/proc/pressure/cpu` avg10 = 最近 10s 在等 CPU 的时间占比），不额外采样
+- 一行 10 个整数 `<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <mW> <充电> <占用%> <帧率> <刷新率Hz> <GPU占用%>`，排版在 App 侧做
+- **显示格式（v1.8.1）**：`CPU: 性能核/能效核/占用%  GPU: 频率/占用%  TEMP: 39℃  PWR: 1.2W  FPS: 119/120Hz`
+- **CPU 占用（v1.8.5 修正语义）**：第 7 字段旧版塞的是 **PSI**（`/proc/pressure/cpu` 的 avg10 = "有任务因等 CPU 而卡住的时间占比"），App 里却标着"占用%"。这两个量的方向性完全不同：8 核机器上跑 2~3 线程的游戏，PSI 常常是 0~9%，而大核早已跑满 —— 不是精度问题，是**显示的量本身就错了**。现在改成标准做法：读 `/proc/stat` 的 `cpu` 汇总行做差分，`(Δ非空闲)/(Δ总时间)` = 8 核平均利用率。`/proc/stat` 一次 open 约 0.25~0.75ms，比 PSI(0.17ms) 贵，所以 **10 秒才读一次**，其余轮沿用。PSI 只在 `/proc/stat` 读不到时作为兜底
 - **GPU 占用**取自高通 KGSL `gpu_busy_percentage`。踩过两个坑：①设备 `/system/bin/sh`(mksh) **不支持 `${v//[^0-9]/}` 否定字符类**，`"16 %"` 会被解析成 `" %"`（数字反被删）→ 恒 0；改用 `${raw%% *}` 截空格。②该节点是**异步统计快照**（内核约 5s 才更新一次），单次读有时为 0 → 改为**单次读 + 保持上次非零值（最多 2 轮）**。实测真游戏负载下每 5s 采样 8/8 全部命中（16%~30%）
 - **功耗（v1.8.3 修复）**：默认取电池 `current_now × voltage_now`（µA×µV→mW）。两个坑：①设备 mksh 的 `$(( ))` 是 **32 位**运算，`µV × µA ≈ 2.7e12` 会溢出回绕 → 恒显示 0.0W，改用**先除后乘** `(V/1000)*(I/1000)/1000`；②电池满电（status=Full）时 `current_now` 会掉到涓流噪声（实测 200 次读里 53 次是 0），此时**整机功耗全部来自充电器**，改用 **USB 输入功率兜底**（`usb/current_now × usb/voltage_now`）。注意 `usb` 的电压是 µV 而 `wireless` 是 mV，量级差 1000 倍需守卫。App 侧刷新阈值 50mW（显示精度 0.1W）
 - **`+` 后缀只由 status 决定（v1.8.4 修复 PWR 恒带 `+`）**：旧代码拿 `current_now` 的符号推断"是否充电"（正=充电），但本机 `mca,business_battery` 的约定是**充电为负、放电为正**（实测插电时 `STATUS=Charging` 而 `CURRENT_NOW=-1169000µA`），于是**放电时也被判成充电，`PWR` 永远带 `+`**。现在：`Charg*`/`Full` → 显示 `+`；`Discharging` → 绝不显示；`Not charging`/读不到 → 用 `usb|wireless/online` 兜底（接电源仍算 `+`）。电流符号只用于取幅值算功率，方向交给 `status` —— 与 `api.cgi`/`index.html` 的判定统一
 
-- **帧率取自 SurfaceFlinger**（v1.8.1 起）。内核 `measured_fps` 节点统计的是"CRTC 提交的帧"，遇到 SurfaceView 直通的游戏会**漏计**（同一个游戏：内核读 36~56 跳动，SF 读 125 稳定）。做法：`dumpsys SurfaceFlinger --timestats -dump` 取全局 `totalFrames` 与 `statsEnd`，**差分算帧率**（不判断前台包名）。注意 `totalFrames` **必须先 `--timestats -enable` 才会累积**（实测：不 enable 时恒定不变，enable 后每 3s 涨 367 帧 = 122fps）。采样每 10 秒一次（约 30ms，占空比 0.3%），守护退出时 `-disable` 清理
+### 采样开销: 按"单项实测代价"分档（v1.8.5）
+
+先用 `read < file` 逐个量了一遍（300 次均值，亮屏静止；mksh 一次 read 的底噪 ≈ 150~250µs）：
+
+| 节点 | 单次开销 | 说明 |
+|---|---|---|
+| `battery/current_now` | **1166µs** | 走电量计 I2C，是底噪的 5 倍 |
+| `battery/voltage_now` | **1156µs** | 同上 |
+| `battery/status` / `temp` | 250µs | 便宜 |
+| `usb/current_now` | **5766µs** | 走 PD 控制器，**5.8ms** |
+| `usb/voltage_now` | **6126µs** | **6.1ms** |
+| `kgsl-3d0/temp` | 483µs | 经 GPU 驱动取值 |
+| `kgsl-3d0/clock_mhz` / `gpu_busy_percentage` | ~240µs | |
+| `thermal_zone*/temp` × 21 | 253µs/个 ≈ **5.3ms** | 全读一次 |
+| `dumpsys SurfaceFlinger --timestats -dump` | **69ms（亮屏）/ 235ms（息屏 Dozing）** | 旧注释写的 30ms 差 2~8 倍 |
+| `cmd notification post` | **26ms（亮屏）/ 86ms（息屏）** | 旧注释写的 40ms 也偏了 |
+
+据此把"每轮都读"改成**按变化快慢分档**：
+
+| 数据 | 频率 | 理由 |
+|---|---|---|
+| 频率 / GPU 频率 / GPU 占用 / PSI(兜底) / 内核帧率 / 刷新率 | 每轮 | 真需要新鲜 |
+| 电池电流 / status | 每轮 | PWR 主信号、充电判定 |
+| 电池电压 | 2 轮（10s） | 端电压 5s 内变化 <0.5%，对 mW 影响 <1% |
+| CPU 占用 | 10s | 利用率天然要窗口 |
+| CPU 温度 / GPU 温度 | 30s | 分钟级缓变量 |
+| 电池温度 | 60s | 同上 |
+| 充电器 V×I（PWR 兜底） | 30s | 两项加起来 12ms，每轮读会让整轮从 3ms 涨到 15ms |
+
+另外三项结构性问题一起改了：
+- **`dumpsys SurfaceFlinger` 按需触发**：屏幕静止（内核 `measured_fps`=0）时 SF 也不会有新帧，改 60s 兜底一次；有帧时仍是 10s 一次。实测静止画面下 90 秒内 dump 次数从 9 次降到 2 次
+- **通知先拼串再比较**：旧版只要频率/温度过阈值就 fork 一次 `cmd notification`，而大多数重发的文本和上一条一模一样；现在每轮只拼串（零 fork）写 `hud_last.txt`，**文本真的变了**才发
+- **`bench` 子命令本身是错的**：它从 `tick=0` 连跑 50 次 `sample()`，而 SF dump 的触发条件是 `tick%10==0` → 50 轮全命中 → 报出 245ms/轮，把"采样"和"一次 235ms 的 dump"混成一个数。现在分项计时 + 按生产节奏（`tick+=5`）算整轮
+
+**端到端实测**（同机同条件：亮屏静止、`hud_notify=0` 只留悬浮窗、连测 120 秒，`/proc/<pid>/stat` 取 utime+stime+cutime+cstime）：
+
+| | 本体 | 子进程 | 合计 | 折合单核 |
+|---|---|---|---|---|
+| v1.8.4 | 300ms | 1220ms | 1520ms | 1.26% |
+| v1.8.5 | 160ms | 720ms | **880ms** | **0.73%** |
+
+（`hud_notify=0` 时不发通知；若开启通知，v1.8.5 的"文本未变不重发"还能再省一批 26ms 的 fork。）
+
+
+- **帧率取自 SurfaceFlinger**（v1.8.1 起）。内核 `measured_fps` 节点统计的是"CRTC 提交的帧"，遇到 SurfaceView 直通的游戏会**漏计**（同一个游戏：内核读 36~56 跳动，SF 读 125 稳定）。做法：`dumpsys SurfaceFlinger --timestats -dump` 取全局 `totalFrames` 与 `statsEnd`，**差分算帧率**（不判断前台包名）。注意 `totalFrames` **必须先 `--timestats -enable` 才会累积**（实测：不 enable 时恒定不变，enable 后每 3s 涨 367 帧 = 122fps）。守护退出时 `-disable` 清理。
+  **单次 dump 实测 69ms（亮屏）/ 235ms（息屏 Dozing）**，原注释写的"约 30ms"差了 2~8 倍 —— 这是整条采样链里最贵的动作，所以 v1.8.5 起按内核 `measured_fps` 门控：有帧时 10s 一次，静止（内核帧率为 0）时 60s 才兜底一次（静止 90 秒内 dump 次数 9 → 2）。差分失败时沿用上次有效值，不退回内核的不准确读数（否则界面会在 124 和 41 之间跳）。解析也去掉了两个 `awk` fork，改用一次 `while read` 读到 `totalFrames`/`statsEnd` 就 break（dump 有 8600 行，但头部第 3~5 行就有）
 - **v1.7.1 起默认顶部水平居中**（`Gravity.CENTER_HORIZONTAL|TOP`）：X = 相对屏幕水平中心的偏移（300=正中），Y = 距顶部距离（0=贴顶，正好落在挖孔上方的空白带，不被遮挡）。竖屏恒定显示；**横屏是否显示可在 App 里单独开关**（不依赖 `onConfigurationChanged`，MIUI 上不可靠，改每 2s 自轮询方向）
 - **v1.8.0 起 App 的"开启/关闭悬浮窗"是真正的启停**：关闭会写 `hud_on=false`，`HudService` 读到后 `stopSelf()` 且返回 `START_NOT_STICKY`，连开机 `service.sh` 的强制拉起也不会复活；再点开启才恢复
 - 位置可调：`echo "300 0" > /data/local/tmp/k90_hud_pos.txt`（X=300 正中，Y=0 贴顶；单位 dp，2 秒生效）；App 里拖滑块同样有效，两者按"谁更新"决定
