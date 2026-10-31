@@ -608,7 +608,7 @@ render_post() {
 # 写给状态栏悬浮窗 App 的紧凑串(它没有 root, 读不了 sysfs, 只能读这个文件)。
 # 用 printf 内建重定向, 不 fork。文件在 /data/local/tmp, 对普通 app 可读(0644)。
 HUD_FILE=/data/local/tmp/k90_hud.txt
-# 格式: "<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <功耗mW> <是否充电1/0> <占用%> <帧率> <刷新率Hz> <GPU占用%>"，排版交给 App。
+# 格式: "<性能核kHz> <超大核kHz> <CPU温度m℃> <GPUMHz> <功耗mW> <是否充电1/0> <占用%> <帧率> <刷新率Hz> <GPU占用%> <电池温度m℃>"，排版交给 App。
 # 全整数: 不用取模拼小数, 也方便 App 用 split 解析。帧率/刷新率节点不存在时为 0(不显示)。
 # 【坑4·前两个字段的顺序】(v1.8.5 修) App 侧 HudService.readRaw() 是
 #   `rLit = p[0]; rBig = p[1];` —— 第 1 个字段必须是**性能核**(policy0), 第 2 个才是超大核。
@@ -616,9 +616,12 @@ HUD_FILE=/data/local/tmp/k90_hud.txt
 #   和状态栏通知(自己拼串, 顺序是对的)对不上。BIG/LIT 两个变量本身没错, 错的是落盘顺序。
 # 第 7 字段 v1.8.5 起是**真实 CPU 利用率**(/proc/stat 差分), 旧版塞的是 PSI avg10 ——
 #   语义不同(PSI 是"等 CPU 卡住的时间占比"), App 里却标着"占用%", 数值也是错的。字段位置不变。
-# 第 10 字段 GB (GPU 占用%) 是 v1.8.0 新增。文件是覆盖写(printf > ), 恒定几十字节, 不会无限增长。
+# 第 10 字段 GB (GPU 占用%) 是 v1.8.0 新增。
+# 第 11 字段 BT (电池温度 m℃) 是 v1.8.7 新增 —— 悬浮窗的 TEMP 要显示"CPU/电池"两个值,
+#   而 App 没有 root、不读 sysfs, 只能靠这里带过去。读不到时为 0, App 显示成 "-"。
+# 文件是覆盖写(printf > ), 恒定几十字节, 不会无限增长。字段只能往后加, 不能插队。
 write_state() {
-    printf '%d %d %d %d %d %d %d %d %d %d\n' "$LIT" "$BIG" "$CT" "$GC" "$MW" "$CHG" "$USE" "$FPS" "$REF" "$GB" > "$HUD_FILE" 2>/dev/null
+    printf '%d %d %d %d %d %d %d %d %d %d %d\n' "$LIT" "$BIG" "$CT" "$GC" "$MW" "$CHG" "$USE" "$FPS" "$REF" "$GB" "$BT" > "$HUD_FILE" 2>/dev/null
 }
 
 # AOSP 的 AlertWindowNotification: 只要 App 在别的应用上层画窗口, WMS 就发一条

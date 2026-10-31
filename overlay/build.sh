@@ -33,11 +33,15 @@ cp "$OUT/base.apk" "$OUT/app.apk"
 echo "[5/5] 对齐 + 签名"
 "$BT/zipalign" -f 4 "$OUT/app.apk" "$OUT/app-aligned.apk"
 if [ ! -f keystore.jks ]; then
+    # 【重要】生成的是一把**新 key**。已装过旧版 APK 的手机签名对不上,
+    # pm install -r 会报 INSTALL_FAILED_UPDATE_INCOMPATIBLE, 而 service.sh 里的安装是
+    # 静默执行的(>/dev/null), 失败不报错 —— 表现为"改了 App 但界面没变化"。
+    # 所以: 原 keystore.jks 必须保留(口令 android, *.jks 已 gitignore), 换机器前先拷回来。
     keytool -genkeypair -keystore keystore.jks -alias k90hud \
         -keyalg RSA -keysize 2048 -validity 10000 \
         -storepass android -keypass android \
         -dname "CN=K90HUD, O=local, C=CN" >/dev/null 2>&1
-    echo "  已生成签名用 keystore.jks (口令 android)"
+    echo "  警告: 已生成**新的** keystore.jks(口令 android) —— 覆盖安装到已装旧版的手机前要确认签名一致"
 fi
 "$BT/apksigner" sign --ks keystore.jks --ks-pass pass:android --key-pass pass:android \
     --out "$OUT/k90hud.apk" "$OUT/app-aligned.apk"

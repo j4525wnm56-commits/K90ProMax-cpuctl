@@ -1,6 +1,6 @@
 id=k90_cpuctl
 name=K90 Pro Max 调频 (CPU+GPU)
-version=v1.8.6
-versionCode=24
+version=v1.8.7
+versionCode=25
 author=Langrm
-description=Redmi K90 Pro Max (myron / SM8850) 的 CPU/GPU 频率档位管理。v1.8.6 数值可信度 + 温度行精简: ①满电时 PWR 原来取充电器电流的**单次快照**, 实测该信号 50ms 内能波动 ±100%(以 1 秒 20 次均值为真值, 单次读平均误差 23% 且偏低估), 改为跨轮指数平滑(权重 1/4, 约 20 秒时间常数), 拔线时零开销; ②温度行只保留 CPU 与电池两个读数, 去掉 GPU 温度(随之不再读 kgsl/temp); ③顺手修掉"SF dump 约 30ms"的过时注释(实测 69ms 亮屏 / 235ms 息屏)。v1.8.5 的数值修正与采样分档全部保留。
+description=Redmi K90 Pro Max (myron / SM8850) 的 CPU/GPU 频率档位管理。v1.8.7 悬浮窗温度行改为 CPU/电池: ①悬浮窗(和通知)的 TEMP 现在固定显示"CPU温度/电池温度"(读不到电池温度时显示 "-"); ②状态文件追加第 11 字段(电池温度 m℃)给 App 用, 字段只往后加不插队; ③App 侧把历史遗留的 rPsi 变量改名为 rUse(第 7 字段 v1.8.5 起已是真实利用率, 名字会误导); ④修好"改了 App 但界面不变"的坑: 覆盖安装必须用同一把签名 key, 否则静默失败。v1.8.6 的 PWR 滑动平均与 v1.8.5 的数值修正全部保留。

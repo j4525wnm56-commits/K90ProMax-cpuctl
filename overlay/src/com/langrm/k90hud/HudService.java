@@ -85,8 +85,10 @@ public class HudService extends Service implements Runnable {
     private SharedPreferences sp;
     private String lastText = "";
     // 最近一次读到的原始值 / 最近一次真正显示的原始值
-    private int rLit, rBig, rT, rGc, rMw, rChg, rPsi, rFps, rRef, rGpu;
-    private int sLit, sBig, sT, sGc, sMw, sChg, sPsi, sFps, sRef, sGpu;
+    // 注意: rUse 这个位置历史上装过 PSI(名字沿用 rPsi), v1.8.5 起模块塞的是**真实 CPU 利用率**,
+    // 所以这里改名为 rUse —— 别被旧名误导成"压力值"。
+    private int rLit, rBig, rT, rGc, rMw, rChg, rUse, rFps, rRef, rGpu, rBt;
+    private int sLit, sBig, sT, sGc, sMw, sChg, sUse, sFps, sRef, sGpu, sBt;
     private long lastShownAt = 0;
     private GradientDrawable pillBg;
     private final int[] hLit = new int[SMOOTH_N];
@@ -94,6 +96,7 @@ public class HudService extends Service implements Runnable {
     private final int[] hT   = new int[SMOOTH_N];
     private final int[] hGc  = new int[SMOOTH_N];
     private final int[] hMw  = new int[SMOOTH_N];
+    private final int[] hBt  = new int[SMOOTH_N];
     private int hIdx = 0, hCnt = 0;
     /** 当前是否因"横屏 + 关掉了横屏显示"被隐藏 */
     private boolean hidden = false;
@@ -244,11 +247,11 @@ public class HudService extends Service implements Runnable {
             lastText = s;
             tv.setText(s);
         }
-        sLit = rLit; sBig = rBig; sT = rT; sGc = rGc; sMw = rMw; sChg = rChg; sPsi = rPsi; sFps = rFps; sRef = rRef; sGpu = rGpu;
+        sLit = rLit; sBig = rBig; sT = rT; sGc = rGc; sMw = rMw; sChg = rChg; sUse = rUse; sFps = rFps; sRef = rRef; sGpu = rGpu; sBt = rBt;
         lastShownAt = now;
     }
 
-    /** 读一行 "<性能核kHz> <超大核kHz> <温度m℃> <GPUMHz> <功耗mW> <充电> <PSI> <帧率> <刷新率> <GPU占用%>" 到 r* 字段
+    /** 读一行 "<性能核kHz> <超大核kHz> <CPU温度m℃> <GPUMHz> <功耗mW> <充电> <占用%> <帧率> <刷新率> <GPU占用%> <电池温度m℃>" 到 r* 字段
      *  性能: 模块每 5s 才写一次文件, 这里 2s 轮询一次, 所以有 60% 的轮次是白读。
      *  用 mtime 门控 —— 文件没变就直接返回 false(不解析不重画), 省掉 open+read+split+parse。
      *  注意: 返回 false 会让 update() 提前返回, 但位置更新在 readRaw 之前, 不受影响。 */
@@ -273,10 +276,11 @@ public class HudService extends Service implements Runnable {
             rGc  = p.length > 3 ? Integer.parseInt(p[3]) : 0;
             rMw  = p.length > 4 ? Integer.parseInt(p[4]) : 0;
             rChg = p.length > 5 ? Integer.parseInt(p[5]) : 0;   // 1 = 正在充电
-            rPsi = p.length > 6 ? Integer.parseInt(p[6]) : 0;   // CPU 压力 avg10, %
+            rUse = p.length > 6 ? Integer.parseInt(p[6]) : 0;   // CPU 利用率 %, v1.8.5 起是真值(旧为 PSI)
             rFps = p.length > 7 ? Integer.parseInt(p[7]) : 0;   // 屏幕合成帧率, 静止=0
             rRef = p.length > 8 ? Integer.parseInt(p[8]) : 0;   // 面板刷新率 Hz, 0=节点不存在
             rGpu = p.length > 9 ? Integer.parseInt(p[9]) : 0;   // GPU 占用 %, 静止=0(v1.8.1 新增第10字段)
+            rBt  = p.length > 10 ? Integer.parseInt(p[10]) : 0; // 电池温度 m℃, 0=读不到(v1.8.7 新增第11字段)
             haveParsed = true;
             return rBig > 0;
         } catch (Throwable e) {
@@ -289,6 +293,7 @@ public class HudService extends Service implements Runnable {
     /** 把本次采样压进环形缓冲 */
     private void pushSample() {
         hLit[hIdx] = rLit; hBig[hIdx] = rBig; hT[hIdx] = rT; hGc[hIdx] = rGc; hMw[hIdx] = rMw;
+        hBt[hIdx] = rBt;
         hIdx = (hIdx + 1) % SMOOTH_N;
         if (hCnt < SMOOTH_N) hCnt++;
     }
@@ -312,25 +317,28 @@ public class HudService extends Service implements Runnable {
         if (Math.abs(rGc - sGc) >= TH_GPU) return true;
         if (Math.abs(rMw - sMw) >= TH_PWR) return true;
         if (rChg != sChg) return true;
-        if (Math.abs(rPsi - sPsi) >= 2) return true;
+        if (Math.abs(rUse - sUse) >= 2) return true;
+        if (Math.abs(rBt - sBt) >= TH_TEMP) return true;
         if (Math.abs(rFps - sFps) >= 2) return true;
         if (rRef != sRef) return true;
         if (Math.abs(rGpu - sGpu) >= TH_GPU_USE) return true;
         return System.currentTimeMillis() - lastShownAt >= HEARTBEAT_MS;
     }
 
-    /** 排版: CPU: 性能核/能效核/占用%  GPU: 频率/占用%  TEMP: 39℃  PWR: 1.2W  FPS: -/120Hz
-     *  CPU 占用复用 PSI(/proc/pressure/cpu avg10 = 最近10s 在等 CPU 的时间占比), 不额外采样。 */
+    /** 排版: CPU: 性能核/超大核/占用%  GPU: 频率/占用%  TEMP: CPU温度/电池温度  PWR: 1.2W  FPS: -/120Hz
+     *  CPU 占用用模块算好的真实利用率(/proc/stat 差分), 本类不额外采样。
+     *  温度两个槽位固定: 左=CPU, 右=电池(v1.8.7 起)。电池温度读不到写 "-", 保持格式稳定。 */
     private String render() {
-        int lit = median(hLit), big = median(hBig), t = rT;
+        int lit = median(hLit), big = median(hBig), t = rT, bt = rBt;
         int gc = median(hGc), mw = rMw;
         StringBuilder sb = new StringBuilder(48);
         sb.append("CPU: ").append(fmtFreq(lit)).append('/').append(fmtFreq(big));
-        sb.append('/').append(rPsi).append('%');
+        sb.append('/').append(rUse).append('%');
         if (gc > 0) {
             sb.append(" GPU: ").append(fmtMhz(gc)).append('/').append(rGpu).append('%');
         }
-        sb.append(" TEMP: ").append(t / 1000).append("\u2103");
+        sb.append(" TEMP: ").append(t / 1000).append("\u2103").append('/');
+        if (bt > 0) sb.append(bt / 1000).append("\u2103"); else sb.append('-');
         sb.append(" PWR: ").append(fmtW(mw));
         if (rChg > 0) sb.append('+');
         if (rRef > 0) {
