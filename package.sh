@@ -12,11 +12,12 @@ OUT="dist/${NAME}-${VERSION}.zip"
 mkdir -p dist
 rm -f "$OUT"
 
-# 不进 zip 的东西：仓库元数据、文档、构建脚本本身
+# 不进 zip 的东西：仓库元数据、文档、构建脚本本身、开发用工具
+# （tools/ 是仓库侧的辅助脚本，比如 docs/hud-preview.png 的打码工具，不该装到手机上）
 EXCLUDES=(
   '.git/*' '*.zip' 'dist/*' '*.md' '*.png'
   '.gitignore' '.gitattributes' 'package.sh' 'release.sh' 'release_assets.sh' 'update.json' 'LICENSE'
-  'overlay/*' 'docs/*' '*.jks' '*.keystore'
+  'overlay/*' 'docs/*' 'tools/*' '*.jks' '*.keystore'
 )
 
 if command -v zip >/dev/null 2>&1; then
