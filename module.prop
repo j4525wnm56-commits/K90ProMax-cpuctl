@@ -1,6 +1,6 @@
 id=k90_cpuctl
 name=K90 Pro Max 调频 (CPU+GPU)
-version=v1.8.5
-versionCode=23
+version=v1.8.6
+versionCode=24
 author=Langrm
-description=Redmi K90 Pro Max (myron / SM8850) 的 CPU/GPU 频率档位管理。v1.8.5 数值准确性 + 采样性能: ①"占用%"原来是 PSI(等 CPU 卡住的时间占比), 8 核机上跑游戏常显示 0~9% 而大核已满载 —— 改为 /proc/stat 差分算真实 8 核利用率; ②温度 zone 列表改为每次启动重建(旧缓存里混进了 type=battery 的非 CPU 传感器); ③电池电压/电池温度/GPU 温度/充电器功率改为分级采样(实测 usb/current_now 单读 5.8ms、voltage_now 6.1ms, 每轮读会让整轮 3ms→15ms); ④SurfaceFlinger dump 按内核帧率门控(静止时 60s 一次, 单次实测 69~235ms); ⑤通知改为"文本变了才发"; ⑥修好 bench 子命令。端到端: 每 120 秒 CPU 1520ms→880ms(单核 1.26%→0.73%)。
+description=Redmi K90 Pro Max (myron / SM8850) 的 CPU/GPU 频率档位管理。v1.8.6 数值可信度 + 温度行精简: ①满电时 PWR 原来取充电器电流的**单次快照**, 实测该信号 50ms 内能波动 ±100%(以 1 秒 20 次均值为真值, 单次读平均误差 23% 且偏低估), 改为跨轮指数平滑(权重 1/4, 约 20 秒时间常数), 拔线时零开销; ②温度行只保留 CPU 与电池两个读数, 去掉 GPU 温度(随之不再读 kgsl/temp); ③顺手修掉"SF dump 约 30ms"的过时注释(实测 69ms 亮屏 / 235ms 息屏)。v1.8.5 的数值修正与采样分档全部保留。

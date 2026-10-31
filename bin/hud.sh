@@ -28,8 +28,7 @@ TAG=k90hud
 
 # ---------- 节点存在性: 启动探一次, 循环里不再 [ -e ] ----------
 # 每个 [ -e ] 都是一次 stat(约 20µs), 一轮 6 个 = 0.12ms, 纯浪费。
-KGSL_TEMP=""; KGSL_BUSY=""; KGSL_CLK=""
-[ -e "$KGSL/temp" ]                && KGSL_TEMP="$KGSL/temp"
+KGSL_BUSY=""; KGSL_CLK=""
 [ -e "$KGSL/gpu_busy_percentage" ] && KGSL_BUSY="$KGSL/gpu_busy_percentage"
 [ -e "$KGSL/clock_mhz" ]           && KGSL_CLK="$KGSL/clock_mhz"
 USB_ONL="";  [ -e "$PSDIR/usb/online" ]      && USB_ONL="$PSDIR/usb/online"
@@ -79,7 +78,7 @@ build_tz_list() {
 }
 
 # ---------- 采样(零 fork) ----------
-BIG=0; LIT=0; CT=0; GT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0; PSI=0; FPS=0; REF=0
+BIG=0; LIT=0; CT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0; PSI=0; FPS=0; REF=0
 # 频率: 每轮都读(2 个文件, ~0.5ms)。BIG = 最后一个 policy(超大核簇), LIT = 第一个(小核簇)
 sample_freq() {
     local id v first="" lastv=""
@@ -117,22 +116,10 @@ sample_temp() {
     return 0
 }
 
-# ---------- GPU 温度(30 秒一读) ----------
-# kgsl/temp 单次读 483µs, 而且是"经 GPU 驱动取值", 有附带唤醒成本; GPU 温度是分钟级
-# 缓变量, 每轮读纯浪费 → 与 CPU 温度同样按 30s 采样, 其余轮沿用。
-GT=0; GT_HOLD=0
-GT_INTERVAL=${GT_INTERVAL:-30}
-sample_gputemp() {
-    if [ "$GT_HOLD" != "0" ] && [ $(( tick % GT_INTERVAL )) -ne 0 ]; then
-        GT=$GT_HOLD
-        return 0
-    fi
-    GT=0
-    [ -n "$KGSL_TEMP" ] || { GT_HOLD=0; return 0; }
-    rdg "$KGSL_TEMP"; is_num "$RV" && GT=$RV
-    GT_HOLD=$GT
-    return 0
-}
+# ---------- (GPU 温度已在 v1.8.6 移除) ----------
+# 温度行只保留 CPU 与电池两个读数, GPU 温度不再显示, 因此也不再采样 kgsl/temp
+# (每 30 秒 483µs + 一次 GPU 驱动唤醒)。要恢复: 把下面这段和 render_text 里的
+# "GPU ${F1}℃" 一起加回去即可。
 
 # ---------- GPU 占用 ----------
 # gpu_busy_percentage 是高通 KGSL 节点, 返回 "16 %" 这种。
@@ -280,7 +267,8 @@ sample_fps() {
 # 【方案: 全局 totalFrames 差分】不判断前台包名, 直接用 SF 的全局帧计数:
 #   totalFrames 是**从上次 dump 起新提交的帧数**, statsEnd 是当前时间戳。
 #   两次 dump 的差值 ÷ 时间差 = 全局实际帧率(实测 373帧/3秒 = 124fps, 与 per-layer 125 一致)。
-#   dumpsys SurfaceFlinger --timestats -dump 约 30ms, 每 10 秒一次(占空比 0.3%)。
+#   dumpsys SurfaceFlinger --timestats -dump **实测 69ms(亮屏)/235ms(息屏 Dozing)**,
+#   不是原注释写的"约 30ms"。所以按内核帧率门控: 有帧 10s 一次, 静止 60s 一次。
 # 输出: APP_FPS = 差分算出的帧率; 取不到时为 0(回退到内核 measured_fps)。
 APP_FPS=0
 APP_FPS_HOLD=0
@@ -399,16 +387,22 @@ sample_gpuclk() {
 #   status/current   每轮(充电判定和功耗主信号, 必须新鲜)
 #   voltage          2 轮一次(锂电池端电压变化 <0.5%/5s, 对 mW 的影响 <1%)
 #   battery temp     60 秒一次(分钟级缓变量)
-#   usb/wireless V,I 30 秒一次并缓存 —— 每轮读就是 +12ms/轮(2.5 倍开销)
+#   usb/wireless 电压 30 秒一次(5.15V±0.03, 变化 <1%)
+#   usb/wireless 电流 **只在"电池侧≈0 且接着电源"的兜底态下每轮读**(5.8ms), 见坑2/坑5
 #
 # 【坑2·电池满电后 current_now≈0】插着充电器且电池已充满(status=Full)时,
 #   电池不再充放电, current_now 会掉到 0~9mA 的涓流噪声 → 电池侧功率 ≈0,
 #   看着像"坏掉了"。此时整机功耗全从充电器来, 真实值在 USB 输入侧, 所以用输入功率兜底。
+# 【坑5·兜底值不能取"单次快照"】实测这个输入电流是快变量: 同一分钟内相隔 50ms 两次读,
+#   能从 269mA 掉到 187mA、319mA 掉到 153mA(±100%)。以"1 秒 20 次的均值"当真值去比:
+#   单次读平均误差 23%(8 次里 6 次偏低, 带约 -20% 系统偏差)、3 次取中位 25%、5 次取均值 26%
+#   —— 短窗口换估计量治不了, 因为波动本身就在 1 秒量级。所以改成跨轮指数平滑(权重 1/4,
+#   约 4 轮 ≈ 20 秒时间常数), 显示的是"最近几十秒的输入功率", 更接近"现在耗多少"。
 BV_HOLD=0      # 上次的端电压(µV), 跨轮沿用
 BT_HOLD=0      # 上次的电池温度(m℃), 跨轮沿用
 BT_INTERVAL=${BT_INTERVAL:-60}
-PIN=0          # 充电器输入功率(mW) 缓存
-PIN_TICK=-999  # 上次刷新 PIN 时的 tick
+PIN=0          # 充电器输入功率(mW), 跨轮指数平滑后的值
+PUV=0          # 上次读到的充电器电压(µV), 30 秒一刷
 PIN_INTERVAL=${PIN_INTERVAL:-30}
 ONLPS=""       # 本次探到的在线充电器(usb/wireless), 空=没插
 
@@ -430,7 +424,7 @@ probe_online() {
 }
 
 sample_batt() {
-    local v uv ui st need_onl=0
+    local v ui pnow st need_onl=0
     BI=0; MW=0; CHG=0
 
     # ---------- 1) 是否在充电: 只认 status(+充电器 online), 绝不看电流符号 ----------
@@ -489,24 +483,40 @@ sample_batt() {
         MW=0
     fi
 
-    # 【兜底·只在充电且电池侧几乎不吃电时】用充电器输入功率顶上, 30 秒刷新一次。
+    # 【兜底·只在充电且电池侧几乎不吃电时】用充电器输入功率顶上(滑动平均, 见坑5)。
     #   注意外接电压单位: usb 是 µV(4983000), wireless 是 mV(4454), 量级差 1000 倍。
+    #   这个分支只在"插着电 + 电池不吃电/充满"时进入 —— 拔线后 status 转 Discharging,
+    #   一次节点读都不会发生, 所以放电态的采样开销与 v1.8.5 完全相同。
     if [ "$MW" -lt 100 ] && [ "$CHG" = "1" ]; then
-        if [ "$PIN_TICK" -lt 0 ] || [ $(( tick - PIN_TICK )) -ge "$PIN_INTERVAL" ]; then
-            [ -n "$ONLPS" ] || probe_online
-            PIN=0
-            if [ -n "$ONLPS" ]; then
-                rdg "$PSDIR/$ONLPS/current_now"; ui=$RV
-                rdg "$PSDIR/$ONLPS/voltage_now"; uv=$RV
-                case "$ui" in -*) ui=${ui#-} ;; esac
-                if is_num "$ui" && is_num "$uv" && [ "$ui" -gt 0 ] && [ "$uv" -gt 0 ]; then
-                    if [ "$uv" -lt 100000 ]; then uv=$(( uv * 1000 )); fi
-                    PIN=$(( (uv / 1000) * (ui / 1000) / 1000 ))
+        [ -n "$ONLPS" ] || probe_online
+        if [ -z "$ONLPS" ]; then
+            PIN=0; PUV=0                    # 探不到在线充电器 -> 不留旧值
+        else
+            # 电压: 首次或每 PIN_INTERVAL 秒读一次
+            if [ "$PUV" -eq 0 ] || [ $(( tick % PIN_INTERVAL )) -eq 0 ]; then
+                rdg "$PSDIR/$ONLPS/voltage_now"; v=$RV
+                if is_num "$v" && [ "$v" -gt 0 ]; then
+                    [ "$v" -lt 100000 ] && v=$(( v * 1000 ))   # wireless 报 mV
+                    PUV=$v
                 fi
             fi
-            PIN_TICK=$tick
+            if [ "$PUV" -gt 0 ]; then
+                rdg "$PSDIR/$ONLPS/current_now"; ui=$RV
+                case "$ui" in -*) ui=${ui#-} ;; esac
+                if is_num "$ui" && [ "$ui" -gt 0 ]; then
+                    pnow=$(( (PUV / 1000) * (ui / 1000) / 1000 ))
+                    if [ "$PIN" -gt 0 ] && [ "$pnow" -gt 0 ]; then
+                        PIN=$(( (PIN * 3 + pnow) / 4 ))   # 权重 1/4, 时间常数约 4 轮
+                    else
+                        PIN=$pnow                          # 首次直接落到实测值, 不从 0 慢慢爬
+                    fi
+                fi
+                # 读到 0(拔线瞬间节点还没转)时保留上次值, 不清零, 避免 PWR 闪 0.0W
+            fi
+            [ "$PIN" -gt 0 ] && MW=$PIN
         fi
-        [ "$PIN" -gt 0 ] && MW=$PIN
+    else
+        PIN=0; PUV=0       # 离开兜底态就复位, 下次插上重新积累
     fi
     return 0
 }
@@ -514,12 +524,11 @@ sample_batt() {
 # 全量采样(once / post / bench / loop 用)
 sample() {
     BIG=0; LIT=0; GC=0; GB=0; BI=0; MW=0; CHG=0; PSI=0; FPS=0; REF=0
-    # CT/GT/BV/BT 由各自的采样函数按间隔跨轮保持, 这里**不能**清零, 否则分级采样失效
+    # CT/BV/BT/PIN 由各自的采样函数按间隔跨轮保持, 这里**不能**清零, 否则分级采样失效
     sample_freq
     sample_gpuclk
     sample_temp        # CPU 温度: 30s 一读
-    sample_batt        # 电流每轮, 电压 2 轮, 电池温度 60s, 充电器功率 30s
-    sample_gputemp     # GPU 温度: 30s 一读
+    sample_batt        # 电流每轮, 电压 2 轮, 电池温度 60s, 充电器: 电压 30s/电流仅兜底态
     sample_gpubusy     # GPU 占用: 每轮(内核算好的百分比)
     sample_cpuuse      # CPU 占用: /proc/stat 差分, 10s 一读
     sample_fps         # 内核合成帧率
@@ -538,7 +547,7 @@ sample() {
 TITLE=""; BODY=""; LAST_BODY=""
 PROF_HOLD=""; PROF_TICK=-999
 render_text() {
-    local prof mw g f
+    local prof mw g f ctt
     # 档位名 30 秒刷新一次(用户切档不频繁), 省掉 0.23ms/轮
     if [ "$PROF_TICK" -lt 0 ] || [ $(( tick - PROF_TICK )) -ge 6 ]; then
         if [ -e "$STATE/profile" ]; then rdg "$STATE/profile"; PROF_HOLD=$RV; fi
@@ -554,10 +563,12 @@ render_text() {
     fmt2 "$LIT"; BODY="$BODY · 性能核 ${F2}G"
     [ "$GC" -gt 0 ] && BODY="$BODY · GPU ${GC}M"
     [ "$GB" -gt 0 ] && BODY="$BODY(${GB}%)"
-    fmt1 "$CT"; BODY="$BODY
-CPU ${F1}℃"
-    if [ "$GT" -gt 0 ]; then fmt1 "$GT"; BODY="$BODY · GPU ${F1}℃"; fi
-    if [ "$BT" -gt 0 ]; then fmt1 "$BT"; BODY="$BODY · 电池 ${F1}℃"; fi
+    # 温度段(v1.8.6): 固定写成 TEMP: <CPU温度>/<电池温度>, 不再显示 GPU 温度。
+    # 电池温度读不到时右槽写 "-", 保持格式稳定, 不会因为少一个值就整行变形。
+    fmt1 "$CT"; ctt=$F1
+    if [ "$BT" -gt 0 ]; then fmt1 "$BT"; BODY="$BODY
+TEMP: ${ctt}℃/${F1}℃"; else BODY="$BODY
+TEMP: ${ctt}℃/-"; fi
     # 功耗段恒显示(与状态栏一致); 充电时 "+" 只贴在数值后面, 不能挂在温度后面
     if [ "$mw" -ge 1000 ]; then
         fmt1 "$mw"; pw="${F1}W"
@@ -693,7 +704,6 @@ case "$1" in
         bt "$N" "sample_temp(沿用上次)"   sample_temp
         TEMP_FULL=1; bt "$N" "sample_temp(全读)" sample_temp; TEMP_FULL=0
         bt "$N" "sample_batt"            sample_batt
-        bt "$N" "sample_gputemp(沿用)"    sample_gputemp
         bt "$N" "sample_gpubusy"         sample_gpubusy
         bt "$N" "sample_fps"             sample_fps
         bt "$N" "sample_refresh"         sample_refresh
@@ -705,7 +715,7 @@ case "$1" in
         while [ "$i" -lt "$N" ]; do sample; i=$((i + 1)); tick=$((tick + 5)); done
         e=$(date +%s%3N)
         echo "  平均 $(( (e - s) / N )) ms/轮 (共 $N 轮 / $((e - s))ms)"
-        echo "温度源 $(wc -l < "$TZ_LIST") 个 zone · 分级: CPU温度 ${TEMP_INTERVAL}s / GPU温度 ${GT_INTERVAL}s / 电池温度 ${BT_INTERVAL}s / 电压 2轮 / 占用 ${USE_INTERVAL}s / 充电器功率 ${PIN_INTERVAL}s"
+        echo "温度源 $(wc -l < "$TZ_LIST") 个 zone · 分级: CPU温度 ${TEMP_INTERVAL}s / 电池温度 ${BT_INTERVAL}s / 电压 2轮 / 占用 ${USE_INTERVAL}s / 充电器电压 ${PIN_INTERVAL}s(电流仅兜底态每轮)"
         echo "SF dump: 有帧 ${APP_FPS_INTERVAL}s 一次, 静止 ${APP_FPS_IDLE_INTERVAL}s 一次(单次约 235ms)"
         sample; render_post
         echo "样例:"; cat "$STATE/hud_last.txt" 2>/dev/null
