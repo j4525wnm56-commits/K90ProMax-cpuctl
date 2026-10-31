@@ -524,6 +524,19 @@ cd overlay && ./build.sh      # aapt2 + javac + d8 + zipalign + apksigner
 | 状态文件里某些字段一半对一半错 | **有两个守护在同时写同一个文件**。旧版守护（如调试时遗留在 `/data/local/tmp/` 的副本）用旧公式写 0，新版守护写正确值，两者每 5s 各写一次 → 字段值交替跳变。排查时用 `ps -ef \| grep 'hud.sh loop'` 要看**完整命令行**（短进程名 `sh` 匹配不到），并确认没有 `/data/local/tmp/` 下的旧副本在跑 |
 | 状态文件突然不更新了 | 屏幕息屏（`mWakefulness=Dozing`、背光 0）时守护按设计**暂停采样**（`read_backlight` 返回 0 → `sleep 15` 跳过本轮），这是省电设计不是 bug。唤醒后立刻恢复 |
 
+### 截图发布前：给状态栏的通知图标打码
+
+`docs/hud-preview.png` 是**公开**的。状态栏时钟右边那排小图标是第三方 App 的通知图标，会暴露装了哪些应用；系统图标（信号/网速/WiFi/电量/时钟）不透露安装情况，可以留着。
+
+```sh
+python tools/mask_status_icons.py shot.png --preview   # 先看红框位置对不对
+python tools/mask_status_icons.py shot.png             # 确认后原地打码
+```
+
+默认区域是 K90 Pro Max（1200×2608）实测出来的 `x 172..386 / y 50..96`，换分辨率用 `--rel` 传比例。**没有做"自动识别彩色小方块"**：这台机器的壁纸本身是暖色渐变，饱和度就超过阈值，整条状态栏都会被误判成图标（实测过），所以改成坐标 + 预览人工核对。
+
+⚠️ **图形一旦进了 git 历史就删不干净**：早期有一版未打码的预览图还留在提交 `a2fba6e` 里，按 SHA 依然能打开（`.../blob/a2fba6e/docs/hud-preview.png`）。要彻底清掉只能重写历史 + force-push，代价是所有克隆都要重新同步，所以默认不做。
+
 ## 卸载
 
 管理器里删除模块即可。`uninstall.sh` 依次：停守护 → 停界面 → 读快照还原 CPU/GPU → 清理运行状态（**保留备份文件**）。
