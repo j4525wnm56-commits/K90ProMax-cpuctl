@@ -22,7 +22,8 @@ MODDIR=${MODDIR:-/data/adb/modules/k90_cpuctl}
 STATE=${STATE:-/data/adb/k90_cpuctl}
 CFG=/sys/devices/system/cpu/cpufreq
 KGSL=/sys/class/kgsl/kgsl-3d0
-BATT=/sys/class/power_supply/battery
+PSDIR=${PSDIR:-/sys/class/power_supply}   # 可覆盖, 便于在 PC 上用假节点跑自测
+BATT=$PSDIR/battery
 TAG=k90hud
 
 TH_FREQ=${TH_FREQ:-100000}   # 频率变化阈值 kHz
@@ -286,22 +287,46 @@ sample_gpuclk() {
 
 # 电池功耗: current_now × voltage_now
 sample_batt() {
-    local v uv ui
+    local v uv ui st ps need_onl=0 onlps=""
     BI=0; BV=0; BT=0; MW=0; CHG=0
-    rdg "$BATT/current_now"; v=$RV
-    # 正电流 = 电流流向电池(充电), 负电流 = 放电。CHG 只用来给 App 加 "+" 后缀。
-    case "$v" in
-        -*) v=${v#-} ;;
-        *)  if is_num "$v" && [ "$v" -gt 0 ]; then CHG=1; fi ;;
+
+    # ---------- 1) 是否在充电: 只认 status(+充电器 online), 绝不看电流符号 ----------
+    # 【坑3 · current_now 符号约定】(v1.8.4 修复: PWR 一直带 "+")
+    #   本机(mca,business_battery)是 **充电为负、放电为正**:
+    #     实测插着充电器时 STATUS=Charging 而 CURRENT_NOW=-1169000(µA)。
+    #     与 webroot/api.cgi、index.html 里的注释"放电为正, 充电为负"一致。
+    #   旧代码按"正电流 = 充电"推断 CHG, 于是**拔掉充电器(放电, current_now 为正)也被判成充电**,
+    #   表现就是 PWR 永远带 "+"。电流符号只用来算功率(取绝对值), 方向一律交给 status。
+    rdg "$BATT/status"; st=$RV
+    case "$st" in
+        Charg*|Full) CHG=1 ;;    # 充电中 / 已充满(满电仍插着充电器, 由充电器供电)
+        Discharging) CHG=0 ;;    # 明确放电 -> 一定不显示 "+"
+        *)           need_onl=1 ;;   # Unknown / Not charging / 读不到 -> 用充电器 online 兜底
     esac
+
+    rdg "$BATT/current_now"; v=$RV
+    case "$v" in -*) v=${v#-} ;; esac      # 只取幅值: 功耗显示不看方向
     is_num "$v" && BI=$v
-    # 满电时 current_now 会一直是 0，光看电流判断不出"插着充电器"，所以再看一眼 status
-    rdg "$BATT/status"
-    case "$RV" in Charg*|Full) CHG=1 ;; esac
+
     rdg "$BATT/voltage_now"; v=$RV; is_num "$v" && BV=$v
     rdg "$BATT/temp"; v=$RV
     case "$v" in -*) v=${v#-} ;; esac
     if is_num "$v"; then [ "$v" -lt 1000 ] && v=$((v * 100)); BT=$v; fi
+
+    # 充电器在线状态: usb(有线) / wireless(无线) 任一 online=1 即视为接了电源。
+    # 最多读 2 个文件, 两个用途: ① status 不可判定时补 CHG ② 功耗兜底时挑输入侧。
+    for ps in usb wireless; do
+        [ -e "$PSDIR/$ps/online" ] || continue
+        rdg "$PSDIR/$ps/online"
+        [ "$RV" = "1" ] || continue
+        onlps=$ps
+        break
+    done
+    if [ "$need_onl" = "1" ]; then
+        # Not charging = 接着电源但电池不吃电(电池保护/高温限流): 仍算"有外接电源", 显示 "+"。
+        #   真拔掉线时 status 会转 Discharging, 走不到这个分支。
+        if [ -n "$onlps" ]; then CHG=1; else CHG=0; fi
+    fi
 
     # 单位: µV × µA = pW, /1e9 才是 mW。
     # 旧代码写的 /1e6 得到的是 µW, 却被当 mW 显示 —— 结果大了 1000 倍。
@@ -326,22 +351,16 @@ sample_batt() {
     #   /sys/class/power_supply/usb/current_now(594000µA) × voltage_now(4983000µV) ≈ 2960mW
     #   所以: 电池侧算出的功耗过小(阈值 100mW)时, 改用 USB(无线则用 wireless)输入功率兜底。
     #   这样插电时显示的是"整机从充电器取的功率", 比电池电流更有意义。
-    if [ "$MW" -lt 100 ]; then
-        for _ps in usb wireless; do
-            [ -e "/sys/class/power_supply/$_ps/online" ] || continue
-            rdg "/sys/class/power_supply/$_ps/online"
-            [ "$RV" = "1" ] || continue
-            rdg "/sys/class/power_supply/$_ps/current_now";  ui=$RV
-            rdg "/sys/class/power_supply/$_ps/voltage_now"; uv=$RV
-            case "$ui" in -*) ui=${ui#-} ;; esac
-            is_num "$ui" && is_num "$uv" || continue
-            [ "$ui" -gt 0 ] && [ "$uv" -gt 0 ] || continue
-            # 单位守卫: usb 的 voltage_now 是 µV(4983000), 但 wireless 的是 mV(4454),
-            #   量级差 1000 倍。低于 100000 判定为 mV, 补 ×1000 再算。
-            [ "$uv" -lt 100000 ] && uv=$(( uv * 1000 ))
-            MW=$(( (uv / 1000) * (ui / 1000) / 1000 ))
-            break
-        done
+    if [ "$MW" -lt 100 ] && [ -n "$onlps" ]; then
+        rdg "$PSDIR/$onlps/current_now";  ui=$RV
+        rdg "$PSDIR/$onlps/voltage_now"; uv=$RV
+        case "$ui" in -*) ui=${ui#-} ;; esac
+        is_num "$ui" && is_num "$uv" || return 0
+        [ "$ui" -gt 0 ] && [ "$uv" -gt 0 ] || return 0
+        # 单位守卫: usb 的 voltage_now 是 µV(4983000), 但 wireless 的是 mV(4454),
+        #   量级差 1000 倍。低于 100000 判定为 mV, 补 ×1000 再算。
+        [ "$uv" -lt 100000 ] && uv=$(( uv * 1000 ))
+        MW=$(( (uv / 1000) * (ui / 1000) / 1000 ))
     fi
     return 0
 }
