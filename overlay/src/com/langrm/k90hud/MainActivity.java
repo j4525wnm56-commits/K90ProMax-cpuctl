@@ -61,7 +61,7 @@ public class MainActivity extends Activity
 
         TextView t2 = new TextView(this);
         t2.setText("把 CPU 频率/温度居中显示在屏幕顶部。数据由模块写进 "
-                + "/data/local/tmp/k90_hud.txt，本应用只负责显示，不需要 root。"
+                + "/data/local/tmp/ 下的状态文件，本应用只负责显示，不需要 root。"
                 + "竖屏恒定显示；横屏可在下方单独开关。");
         t2.setTextSize(13);
         t2.setTextColor(Color.parseColor("#9aa7b4"));

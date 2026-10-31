@@ -1,6 +1,6 @@
 id=k90_cpuctl
 name=K90 Pro Max 调频 (CPU+GPU)
-version=v1.8.7
-versionCode=25
+version=v1.8.8
+versionCode=26
 author=Langrm
-description=Redmi K90 Pro Max (myron / SM8850) 的 CPU/GPU 频率档位管理。v1.8.7 悬浮窗温度行改为 CPU/电池: ①悬浮窗(和通知)的 TEMP 现在固定显示"CPU温度/电池温度"(读不到电池温度时显示 "-"); ②状态文件追加第 11 字段(电池温度 m℃)给 App 用, 字段只往后加不插队; ③App 侧把历史遗留的 rPsi 变量改名为 rUse(第 7 字段 v1.8.5 起已是真实利用率, 名字会误导); ④修好"改了 App 但界面不变"的坑: 覆盖安装必须用同一把签名 key, 否则静默失败。v1.8.6 的 PWR 滑动平均与 v1.8.5 的数值修正全部保留。
+description=Redmi K90 Pro Max (myron / SM8850) 的 CPU/GPU 频率档位管理。v1.8.8 与 K Pad 版共用同一套 HUD 协议: ①状态文件扩到 13 字段(新增中核簇 MID、GPU 上限标记 GCAP), 本机双簇/高通, 这两个恒 0, 显示自动退回两簇+真实频率; ②App 同时认 kpad_hud.txt 与 k90_hud.txt 两种状态文件, 两台机器共用一个 APK 源码; ③App 支持三簇渲染与 GPU "≤上限" 标注(仅在对应字段非 0 时生效, 本机不受影响); ④清单里的组件改为全限定类名, 使应用名/包名可以按机型用构建参数覆盖(LABEL=/PKG=)。v1.8.5~1.8.7 的数值修正全部保留。

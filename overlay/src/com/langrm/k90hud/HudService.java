@@ -45,7 +45,12 @@ import java.io.FileReader;
  */
 public class HudService extends Service implements Runnable {
 
-    private static final String STATE = "/data/local/tmp/k90_hud.txt";
+    /** 状态文件：先找机型自己的名字，再退回旧名 —— 这样同一份 App 能同时服务
+     *  骁龙版(k90_hud.txt)和 K Pad 版(kpad_hud.txt)，不用为两台机器编译两份。 */
+    private static final String[] STATE_CANDIDATES = {
+            "/data/local/tmp/kpad_hud.txt",
+            "/data/local/tmp/k90_hud.txt"
+    };
     private static final String POS = "/data/local/tmp/k90_hud_pos.txt";
 
     /** 整体下移 5 个物理像素(用户逐步调: 3 -> +2) */
@@ -87,11 +92,13 @@ public class HudService extends Service implements Runnable {
     // 最近一次读到的原始值 / 最近一次真正显示的原始值
     // 注意: rUse 这个位置历史上装过 PSI(名字沿用 rPsi), v1.8.5 起模块塞的是**真实 CPU 利用率**,
     // 所以这里改名为 rUse —— 别被旧名误导成"压力值"。
-    private int rLit, rBig, rT, rGc, rMw, rChg, rUse, rFps, rRef, rGpu, rBt;
-    private int sLit, sBig, sT, sGc, sMw, sChg, sUse, sFps, sRef, sGpu, sBt;
+    // rMid = 中核簇(三簇机型才有, 两簇机型模块写 0)。K90 是双簇, K Pad(policy0/4/7) 是三簇。
+    private int rLit, rMid, rBig, rT, rGc, rMw, rChg, rUse, rFps, rRef, rGpu, rBt, rGcap;
+    private int sLit, sMid, sBig, sT, sGc, sMw, sChg, sUse, sFps, sRef, sGpu, sBt, sGcap;
     private long lastShownAt = 0;
     private GradientDrawable pillBg;
     private final int[] hLit = new int[SMOOTH_N];
+    private final int[] hMid = new int[SMOOTH_N];
     private final int[] hBig = new int[SMOOTH_N];
     private final int[] hT   = new int[SMOOTH_N];
     private final int[] hGc  = new int[SMOOTH_N];
@@ -101,6 +108,8 @@ public class HudService extends Service implements Runnable {
     /** 当前是否因"横屏 + 关掉了横屏显示"被隐藏 */
     private boolean hidden = false;
     /** 状态文件的 mtime: 没变就跳过解析(模块 5s 写一次, App 2s 轮询一次, 多数轮次可省) */
+    /** 实际使用的状态文件路径（首轮解析一次） */
+    private String statePath = null;
     private long lastStateMtime = 0;
     /** 是否已经成功解析过至少一次(首轮不能跳过) */
     private boolean haveParsed = false;
@@ -247,7 +256,7 @@ public class HudService extends Service implements Runnable {
             lastText = s;
             tv.setText(s);
         }
-        sLit = rLit; sBig = rBig; sT = rT; sGc = rGc; sMw = rMw; sChg = rChg; sUse = rUse; sFps = rFps; sRef = rRef; sGpu = rGpu; sBt = rBt;
+        sLit = rLit; sBig = rBig; sT = rT; sGc = rGc; sMw = rMw; sChg = rChg; sUse = rUse; sFps = rFps; sRef = rRef; sGpu = rGpu; sBt = rBt; sMid = rMid;
         lastShownAt = now;
     }
 
@@ -256,7 +265,13 @@ public class HudService extends Service implements Runnable {
      *  用 mtime 门控 —— 文件没变就直接返回 false(不解析不重画), 省掉 open+read+split+parse。
      *  注意: 返回 false 会让 update() 提前返回, 但位置更新在 readRaw 之前, 不受影响。 */
     private boolean readRaw() {
-        File f = new File(STATE);
+        if (statePath == null) {
+            for (String c : STATE_CANDIDATES) {
+                if (new File(c).exists()) { statePath = c; break; }
+            }
+            if (statePath == null) statePath = STATE_CANDIDATES[0];
+        }
+        File f = new File(statePath);
         if (!f.exists()) return false;
         long mt = f.lastModified();
         if (mt == lastStateMtime && haveParsed) return false;   // 文件没更新, 跳过
@@ -281,6 +296,8 @@ public class HudService extends Service implements Runnable {
             rRef = p.length > 8 ? Integer.parseInt(p[8]) : 0;   // 面板刷新率 Hz, 0=节点不存在
             rGpu = p.length > 9 ? Integer.parseInt(p[9]) : 0;   // GPU 占用 %, 静止=0(v1.8.1 新增第10字段)
             rBt  = p.length > 10 ? Integer.parseInt(p[10]) : 0; // 电池温度 m℃, 0=读不到(v1.8.7 新增第11字段)
+            rMid = p.length > 11 ? Integer.parseInt(p[11]) : 0; // 中核簇 kHz, 0=该机型只有两簇(K Pad 新增第12字段)
+            rGcap = p.length > 12 ? Integer.parseInt(p[12]) : 0; // 1=第3字段是"上限"而非实时频率(MTK 平台)
             haveParsed = true;
             return rBig > 0;
         } catch (Throwable e) {
@@ -293,7 +310,7 @@ public class HudService extends Service implements Runnable {
     /** 把本次采样压进环形缓冲 */
     private void pushSample() {
         hLit[hIdx] = rLit; hBig[hIdx] = rBig; hT[hIdx] = rT; hGc[hIdx] = rGc; hMw[hIdx] = rMw;
-        hBt[hIdx] = rBt;
+        hBt[hIdx] = rBt; hMid[hIdx] = rMid;
         hIdx = (hIdx + 1) % SMOOTH_N;
         if (hCnt < SMOOTH_N) hCnt++;
     }
@@ -318,6 +335,7 @@ public class HudService extends Service implements Runnable {
         if (Math.abs(rMw - sMw) >= TH_PWR) return true;
         if (rChg != sChg) return true;
         if (Math.abs(rUse - sUse) >= 2) return true;
+        if (rMid > 0 && Math.abs(rMid - sMid) >= TH_FREQ) return true;
         if (Math.abs(rBt - sBt) >= TH_TEMP) return true;
         if (Math.abs(rFps - sFps) >= 2) return true;
         if (rRef != sRef) return true;
@@ -332,10 +350,19 @@ public class HudService extends Service implements Runnable {
         int lit = median(hLit), big = median(hBig), t = rT, bt = rBt;
         int gc = median(hGc), mw = rMw;
         StringBuilder sb = new StringBuilder(48);
-        sb.append("CPU: ").append(fmtFreq(lit)).append('/').append(fmtFreq(big));
+        sb.append("CPU: ").append(fmtFreq(lit));
+        // 三簇机型(本机 K Pad): 小 / 中 / 超大, 和模块的通知文本保持同一顺序
+        if (rMid > 0) {
+            int mid = median(hMid);
+            if (mid > 0) sb.append('/').append(fmtFreq(mid));
+        }
+        sb.append('/').append(fmtFreq(big));
         sb.append('/').append(rUse).append('%');
         if (gc > 0) {
-            sb.append(" GPU: ").append(fmtMhz(gc)).append('/').append(rGpu).append('%');
+            sb.append(" GPU: ");
+            // MTK 平台拿不到真实 GPU 频率, 模块给的是当前上限 -> 加 <= 免得被当成实时值
+            if (rGcap > 0) sb.append('\u2264');
+            sb.append(fmtMhz(gc)).append('/').append(rGpu).append('%');
         }
         sb.append(" TEMP: ").append(t / 1000).append("\u2103").append('/');
         if (bt > 0) sb.append(bt / 1000).append("\u2103"); else sb.append('-');

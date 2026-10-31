@@ -78,7 +78,11 @@ build_tz_list() {
 }
 
 # ---------- 采样(零 fork) ----------
-BIG=0; LIT=0; CT=0; GC=0; GB=0; BI=0; BV=0; BT=0; MW=0; CHG=0; PSI=0; FPS=0; REF=0
+BIG=0; LIT=0; CT=0; GC=0; GB=0;
+# MID = 中核簇(K Pad 三簇机型才有), GCAP = "第4字段是上限不是实时频率"(MTK);
+# 本机是双簇 + 高通 kgsl, 这两个恒 0, 只为了两台机器共用同一份状态文件格式。
+MID=0; GCAP=0
+ BI=0; BV=0; BT=0; MW=0; CHG=0; PSI=0; FPS=0; REF=0
 # 频率: 每轮都读(2 个文件, ~0.5ms)。BIG = 最后一个 policy(超大核簇), LIT = 第一个(小核簇)
 sample_freq() {
     local id v first="" lastv=""
@@ -617,11 +621,14 @@ HUD_FILE=/data/local/tmp/k90_hud.txt
 # 第 7 字段 v1.8.5 起是**真实 CPU 利用率**(/proc/stat 差分), 旧版塞的是 PSI avg10 ——
 #   语义不同(PSI 是"等 CPU 卡住的时间占比"), App 里却标着"占用%", 数值也是错的。字段位置不变。
 # 第 10 字段 GB (GPU 占用%) 是 v1.8.0 新增。
+# 第 12 字段 MID (中核簇 kHz) / 第 13 字段 GCAP (1=第4字段是"上限") 是 v1.8.8 新增:
+#   为了和 K Pad 版共用同一份状态文件格式(那边是三簇 + MTK 没有真实 GPU 频率)。
+#   本机双簇 + kgsl, 这两个字段恒写 0, App 会自动退回"两簇 + 真实频率"的显示。
 # 第 11 字段 BT (电池温度 m℃) 是 v1.8.7 新增 —— 悬浮窗的 TEMP 要显示"CPU/电池"两个值,
 #   而 App 没有 root、不读 sysfs, 只能靠这里带过去。读不到时为 0, App 显示成 "-"。
 # 文件是覆盖写(printf > ), 恒定几十字节, 不会无限增长。字段只能往后加, 不能插队。
 write_state() {
-    printf '%d %d %d %d %d %d %d %d %d %d %d\n' "$LIT" "$BIG" "$CT" "$GC" "$MW" "$CHG" "$USE" "$FPS" "$REF" "$GB" "$BT" > "$HUD_FILE" 2>/dev/null
+    printf '%d %d %d %d %d %d %d %d %d %d %d %d %d\n' "$LIT" "$BIG" "$CT" "$GC" "$MW" "$CHG" "$USE" "$FPS" "$REF" "$GB" "$BT" "$MID" "$GCAP" > "$HUD_FILE" 2>/dev/null
 }
 
 # AOSP 的 AlertWindowNotification: 只要 App 在别的应用上层画窗口, WMS 就发一条

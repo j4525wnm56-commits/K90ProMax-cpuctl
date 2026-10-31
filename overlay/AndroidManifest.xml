@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.langrm.k90hud"
-    android:versionCode="22"
-    android:versionName="1.8.7">
+    android:versionCode="23"
+    android:versionName="1.8.8">
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -14,7 +14,7 @@
         android:allowBackup="false">
 
         <activity
-            android:name=".MainActivity"
+            android:name="com.langrm.k90hud.MainActivity"
             android:exported="true"
             android:label="K90 HUD">
             <intent-filter>
@@ -26,7 +26,7 @@
         <!-- exported 是为了让 adb shell 能用 am start-foreground-service 直接拉起来;
              服务只是读取 /data/local/tmp 下的一个文本并画个悬浮窗, 没有敏感能力 -->
         <service
-            android:name=".HudService"
+            android:name="com.langrm.k90hud.HudService"
             android:exported="true"
             android:foregroundServiceType="specialUse">
             <property

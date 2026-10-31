@@ -13,9 +13,25 @@ OUT=build
 rm -rf "$OUT"
 mkdir -p "$OUT/classes" "$OUT/dex"
 
+# 应用名可以按机型覆盖: LABEL="K Pad HUD" sh build.sh
+# (同一份源码给两台机器用 —— 包名不变, 只换桌面显示的名字, 用户偏好不会丢)
+LABEL=${LABEL:-}
+PKG=${PKG:-}
+if [ -n "$LABEL" ] || [ -n "$PKG" ]; then
+    # 组件名在清单里已经是全限定类名, 所以换 package 不会把 .HudService 解析错
+    sed -e "s/android:label=\"K90 HUD\"/android:label=\"${LABEL:-K90 HUD}\"/g" \
+        -e "s/package=\"com.langrm.k90hud\"/package=\"${PKG:-com.langrm.k90hud}\"/g" \
+        AndroidManifest.xml > "$OUT/AndroidManifest.xml"
+    MANIFEST="$OUT/AndroidManifest.xml"
+    [ -n "$LABEL" ] && echo "  应用名: $LABEL"
+    [ -n "$PKG" ]   && echo "  包名:   $PKG"
+else
+    MANIFEST=AndroidManifest.xml
+fi
+
 echo "[1/5] aapt2 link"
 "$BT/aapt2" link -o "$OUT/base.apk" -I "$PLATFORM" \
-    --manifest AndroidManifest.xml \
+    --manifest "$MANIFEST" \
     --min-sdk-version 30 --target-sdk-version 34
 
 echo "[2/5] javac"
