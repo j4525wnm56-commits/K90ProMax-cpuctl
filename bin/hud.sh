@@ -634,7 +634,11 @@ write_state() {
 # AOSP 的 AlertWindowNotification: 只要 App 在别的应用上层画窗口, WMS 就发一条
 # ONGOING 通知("……正在其他应用的上层显示内容"), 用户划不掉, 也没有系统开关能关。
 # 唯一可用的办法是把它 snooze 掉(实测有效, 会进 "Snoozed notifications" 分区),
-# 但 snooze 有有效期, 所以在守护循环里每 50 分钟续一次。
+# 但 snooze 有两个坑(v1.8.9 修):
+#   ① 有效期 1 小时, 原来每 50 分钟才续一次, 中间任何一次失败(守护重启/系统抽风)就裸奔;
+#   ② 守护刚启动时(tick=0)App 的窗口还没加到 WMS, 通知尚未 post, 这时 snooze 是空跑 ——
+#      而下一次要等 50 分钟, 所以"重启后通知又冒出来"就是这么来的。
+# 现在改成: 启动后前 60 秒每轮都试(把刚 post 的通知立刻按住), 之后每 10 分钟续一次(6 倍冗余)。
 ALERT_KEY="0|android|0|com.android.server.wm.AlertWindowNotification - com.langrm.k90hud|1000"
 snooze_alert() {
     pm list packages 2>/dev/null | grep -q 'com.langrm.k90hud' || return 0
@@ -760,8 +764,8 @@ case "$1" in
                 [ "$BODY" = "$LAST_BODY" ] || post_notify
                 mark_posted
             fi
-            # ONGOING 悬浮窗通知每 50 分钟续一次 snooze(tick 单位秒)
-            [ $((tick % 3000)) -eq 0 ] && snooze_alert
+            # ONGOING 悬浮窗通知: 前 60 秒每轮 snooze(覆盖"通知刚 post"的窗口), 之后每 10 分钟续
+            { [ "$tick" -le 60 ] || [ $((tick % 600)) -eq 0 ]; } && snooze_alert
             sleep "$iv"; tick=$((tick + iv))
         done
         # 退出时关掉 SurfaceFlinger 的 timestats 统计(它会一直累积直方图, 占内存)

@@ -1,6 +1,6 @@
 id=k90_cpuctl
 name=K90 Pro Max 调频 (CPU+GPU)
-version=v1.8.8
-versionCode=26
+version=v1.8.9
+versionCode=27
 author=Langrm
-description=Redmi K90 Pro Max (myron / SM8850) 的 CPU/GPU 频率档位管理。v1.8.8 与 K Pad 版共用同一套 HUD 协议: ①状态文件扩到 13 字段(新增中核簇 MID、GPU 上限标记 GCAP), 本机双簇/高通, 这两个恒 0, 显示自动退回两簇+真实频率; ②App 同时认 kpad_hud.txt 与 k90_hud.txt 两种状态文件, 两台机器共用一个 APK 源码; ③App 支持三簇渲染与 GPU "≤上限" 标注(仅在对应字段非 0 时生效, 本机不受影响); ④清单里的组件改为全限定类名, 使应用名/包名可以按机型用构建参数覆盖(LABEL=/PKG=)。v1.8.5~1.8.7 的数值修正全部保留。
+description=Redmi K90 Pro Max (myron / SM8850) 的 CPU/GPU 频率档位管理。v1.8.9 修"正在其他应用上层显示内容"这条通知反复冒出来: 它是 AOSP 的 AlertWindowNotification(pkg=android, ONGOING, 划不掉), 只能 snooze。旧逻辑有两个漏洞 —— ①snooze 有效期 1 小时, 却每 50 分钟才续一次, 中间一次失败就裸奔; ②守护刚启动时(tick=0)App 窗口还没加到 WMS, 通知尚未 post, 那次 snooze 是空跑, 而下一次要等 50 分钟, 于是"重启后通知又出现"。现在改成启动后前 60 秒每轮都 snooze(把刚 post 的通知立刻按住), 之后每 10 分钟续(6 倍冗余)。v1.8.5~v1.8.8 的数值修正与采样优化全部保留。
