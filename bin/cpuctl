@@ -609,18 +609,41 @@ cmd_cores() {
 }
 
 # ---------------- 守护 ----------------
+# 列出所有 __watch 实例的 pid。锁里只有一个 pid, 但软重启会让上一份存活下来,
+# 所以这里按 argv 如实枚举, 不能只看锁。
+watch_pids() {
+    ps -A -o PID,ARGS 2>/dev/null \
+        | grep -F "bin/cpuctl __watch" | grep -v grep \
+        | awk -v me="$$" '$1 != me { print $1 }'
+}
+
+watch_kill_all() {
+    local pids
+    pids=$(watch_pids)
+    for p in $pids; do kill "$p" 2>/dev/null; done
+    [ -n "$pids" ] && sleep 1
+    pids=$(watch_pids)
+    for p in $pids; do kill -9 "$p" 2>/dev/null; done
+}
+
 cmd_watch_on() {
     echo 1 > "$STATE/watch_enabled"
-    if [ "$(get "$STATE/watch.lock/pid")" != "" ] && kill -0 "$(get "$STATE/watch.lock/pid")" 2>/dev/null; then
-        echo "守护已在运行 (pid $(get "$STATE/watch.lock/pid"))"
+    local p
+    p=$(get "$STATE/watch.lock/pid")
+    # 判活要连着"这个 pid 确实是 __watch"一起看: pid 会被复用,
+    # 只 kill -0 会把一个凑巧复用了同号的无关进程当成守护, 于是永不重启。
+    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null \
+       && ps -A -o PID,ARGS 2>/dev/null | grep -F "bin/cpuctl __watch" | grep -q "^ *$p "; then
+        echo "守护已在运行 (pid $p)"
         return 0
     fi
-    rm -rf "$STATE/watch.lock"
+    # 不再盲删锁后拉起: 交给 watch_run.sh 判活 + 去重, 避免又造一个孤儿
     sh "$MODDIR/bin/watch_run.sh" >/dev/null 2>&1
     local i=0
     while [ "$i" -lt 20 ]; do
-        if [ -n "$(get "$STATE/watch.lock/pid")" ]; then
-            echo "守护已启动 (pid $(get "$STATE/watch.lock/pid"))"
+        p=$(get "$STATE/watch.lock/pid")
+        if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+            echo "守护已启动 (pid $p)"
             return 0
         fi
         sleep 0.2 2>/dev/null || sleep 1
@@ -632,20 +655,18 @@ cmd_watch_on() {
 
 cmd_watch_off() {
     echo 0 > "$STATE/watch_enabled"
-    local p
-    p=$(get "$STATE/watch.lock/pid")
-    is_num "$p" && kill "$p" 2>/dev/null
-    sleep 1
-    p=$(get "$STATE/watch.lock/pid")
-    is_num "$p" && kill -9 "$p" 2>/dev/null
+    # 必须按 argv 全杀: 锁里那个可能早就死了, 真正在跑的是没登记过的孤儿。
+    # 只杀锁里那个会留下孤儿继续写 sysfs。
+    watch_kill_all
     rm -rf "$STATE/watch.lock"
     rm -f "$STATE/watch.pid"
     echo "守护已停止 (频率保持当前值, 不再自动维持)"
 }
 
 cmd_watch_status() {
-    local p
+    local p n
     p=$(get "$STATE/watch.lock/pid")
+    n=$(watch_pids | wc -l | tr -d ' ')
     if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
         echo "守护: 运行中 (pid $p)"
     elif [ "$(get "$STATE/watch_enabled")" = "1" ]; then
@@ -653,11 +674,21 @@ cmd_watch_status() {
     else
         echo "守护: 已关闭"
     fi
+    # 多实例 = 每份都在 10s 全量写一遍 sysfs, 是实打实的耗电, 必须显式报警
+    is_num "$n" || n=0
+    [ "$n" -gt 1 ] && echo "警告: 检出 $n 份守护并发 (pid $(watch_pids | tr '\n' ' ')), 执行 cpuctl watch off && cpuctl watch on 收敛"
+    return 0
 }
 
 cmd___watch() {
     local prof limit t until now
+    # 认领所有权: 之后每轮都确认自己还是那个唯一被承认的守护。
+    # 这一条是单实例的最后一道闸 —— 锁目录有可能被 boot/外部脚本删掉,
+    # 删掉之后 watch_run 会再起一份, 而老的一份只看 watch_enabled 是察觉不到的,
+    # 就成了永久孤儿。每轮比对 watch.pid, 被顶替的会在一个 INTERVAL 内自己退出。
+    echo $$ > "$STATE/watch.pid"
     while [ "$(get "$STATE/watch_enabled")" = "1" ]; do
+        [ "$(get "$STATE/watch.pid")" = "$$" ] || return 0
         prof=$(get "$STATE/profile")
         [ -z "$prof" ] && prof=balanced
         # 测速档超时自动回落
@@ -694,7 +725,12 @@ cmd___watch() {
         fi
         sleep "$INTERVAL"
     done
-    rm -rf "$STATE/watch.lock"
+    # 只在自己仍是持有者(或持有者已经死了)时才清锁;
+    # 无条件 rm 会把刚接手那份的锁删掉, 下一轮就又能起第三份。
+    _lp=$(get "$STATE/watch.lock/pid")
+    if [ "$_lp" = "$$" ] || ! { is_num "$_lp" && kill -0 "$_lp" 2>/dev/null; }; then
+        rm -rf "$STATE/watch.lock"
+    fi
 }
 
 # ---------------- WebUI ----------------
@@ -712,7 +748,16 @@ web_cwd_ok() {
     [ "$cwd" = "$WEBROOT" ]
 }
 
-web_alive() { port_busy "$(web_port)" && web_cwd_ok; }
+# 每轮都 nc 一次等于每 10s fork 一个进程, 守护一多就变成纯浪费(6 份 = 6 次/10s)。
+# web.pid + cwd 已经能覆盖"进程没了"和"目录被换掉"这两种真正需要自愈的情况;
+# 端口探测降频到每 4 轮一次, 只用来兜底"进程活着但不响应"。
+_WEB_TICK=0
+web_alive() {
+    web_cwd_ok || return 1
+    _WEB_TICK=$((_WEB_TICK + 1))
+    [ $((_WEB_TICK % 4)) -ne 0 ] && return 0
+    port_busy "$(web_port)"
+}
 
 kill_httpd() {
     local pid line
@@ -827,8 +872,13 @@ cmd_list() {
 
 cmd_boot() {
     sleep 20
-    rm -f "$STATE/web.pid"
-    rm -rf "$STATE/watch.lock"
+    # web.pid / web_port 复位: 端口会随着一次次软重启往 8089/8090 漂,
+    # 每漂一次就多一个常驻 httpd(实测 8088/8089/8090 三份同时在跑)。
+    # 清掉后 web_port() 回落到 8088, web_spawn.sh 会先清场再起。
+    rm -f "$STATE/web.pid" "$STATE/web_port"
+    # 这里绝不能 rm -rf watch.lock: soft-reboot 只重启 init 托管的用户态,
+    # 上一轮 nohup 出去的 __watch 还活着。盲删锁 == 授权再起一份, 旧的立刻变孤儿。
+    # 单实例交给 watch_run.sh 判活 + 物理去重。
     local prof
     prof=$(get "$STATE/profile")
     [ -z "$prof" ] && prof=stock
@@ -857,11 +907,12 @@ cmd_hud_on() {
     echo 1 > "$STATE/hud_enabled"
     iv=$(get "$STATE/hud_interval"); is_num "$iv" || echo 5 > "$STATE/hud_interval"
     p=$(get "$STATE/hud.lock/pid")
-    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null \
+       && ps -A -o PID,ARGS 2>/dev/null | grep -F "bin/hud.sh loop" | grep -q "^ *$p "; then
         echo "HUD 已在运行 (pid $p, 间隔 $(get "$STATE/hud_interval")s)"
         return 0
     fi
-    rm -rf "$STATE/hud.lock"
+    # 交给 hud_run.sh 判活 + 去重, 这里不盲删锁
     sh "$HUD_RUN" >/dev/null 2>&1
     i=0
     while [ "$i" -lt 20 ]; do
@@ -874,14 +925,20 @@ cmd_hud_on() {
     return 1
 }
 
+# 同上: 锁里那个可能早就死了, 真正耗电的是没登记的孤儿, 必须按 argv 全杀
+hud_kill_all() {
+    local pids p
+    pids=$(ps -A -o PID,ARGS 2>/dev/null | grep -F "bin/hud.sh loop" | grep -v grep | awk -v me="$$" '$1 != me { print $1 }')
+    for p in $pids; do kill "$p" 2>/dev/null; done
+    [ -n "$pids" ] && sleep 1
+    pids=$(ps -A -o PID,ARGS 2>/dev/null | grep -F "bin/hud.sh loop" | grep -v grep | awk -v me="$$" '$1 != me { print $1 }')
+    for p in $pids; do kill -9 "$p" 2>/dev/null; done
+}
+
 cmd_hud_off() {
     local p
     echo 0 > "$STATE/hud_enabled"
-    p=$(get "$STATE/hud.lock/pid")
-    is_num "$p" && kill "$p" 2>/dev/null
-    sleep 1
-    p=$(get "$STATE/hud.lock/pid")
-    is_num "$p" && kill -9 "$p" 2>/dev/null
+    hud_kill_all
     rm -rf "$STATE/hud.lock"
     sh "$HUD_SH" off >/dev/null 2>&1
     echo "HUD 已关闭, 状态栏通知已取消"

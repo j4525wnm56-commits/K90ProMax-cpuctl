@@ -324,6 +324,7 @@ su -c "sh /data/adb/modules/k90_cpuctl/bin/cpuctl restore"   # 命令行
 | 切档后某簇没变 | 守护在「写频率」与「写档位」之间用旧档位覆盖一次 | 先写 `profile` 再写频率 |
 | 出现 min=max 的异常档 | 撞上系统 boost，min 被抬到 max | 写入后校验并重试 |
 | 守护自我复制 | `mksh` 遇到函数体内 `&` 会把调用上下文 fork 成子 shell | 后台启动挪到 `web_spawn.sh` / `watch_run.sh`，`mkdir` 原子锁保单实例 |
+| 守护/WebUI 越跑越多（实测 **6 份 `__watch` + 3 份 httpd** 并发） | **`ksud soft-reboot` 只重启 init 托管的用户态**，`service.sh` 因此会照常再跑一遍；而上一轮 `nohup` 出去的进程挂在 pid 1 下不归它管，仍然活着。锁里只记「最新那个 pid」，旧的判活失败就被当成失效 → 又起一份；httpd 侧则因为 8088 仍被上一份占着，"找空端口"逻辑漂到 8089/8090，每漂一次多一份。代价是每 10 秒 6 次全量 sysfs 写 + 6 次 `nc` fork，是待机耗电和"档位跟系统热控对写"的直接来源 | 三个启动器（`watch_run.sh` / `hud_run.sh` / `web_spawn.sh`）在 spawn 前按 argv 物理去重；`__watch` 每轮比对 `$STATE/watch.pid` 所有权令牌，被顶替的在一个 `INTERVAL` 内自杀；`cmd_boot` 不再盲删 `watch.lock`；`watch off` / `hud off` 按 argv 全杀；`web_spawn.sh` 加 `web.lock` 串行化并发启动；`web_alive` 的端口探测降频到每 4 轮一次 |
 | `setsid` 留空壳进程 | toybox 的 `setsid` 不支持 `-f` | 改 `nohup` |
 | 读 `max_clock_mhz` 偶发 Permission denied | 与写入同一时刻竞争 | 重试即可，无实际影响 |
 | `adb forward` 突然失效 | adb server 被重启，转发规则丢失 | 重新 `adb forward` |

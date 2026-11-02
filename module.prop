@@ -1,6 +1,6 @@
 id=k90_cpuctl
 name=K90 Pro Max 调频 (CPU+GPU)
-version=v1.8.9
-versionCode=27
+version=v1.8.10
+versionCode=28
 author=Langrm
-description=Redmi K90 Pro Max (myron / SM8850) 的 CPU/GPU 频率档位管理。v1.8.9 修"正在其他应用上层显示内容"这条通知反复冒出来: 它是 AOSP 的 AlertWindowNotification(pkg=android, ONGOING, 划不掉), 只能 snooze。旧逻辑有两个漏洞 —— ①snooze 有效期 1 小时, 却每 50 分钟才续一次, 中间一次失败就裸奔; ②守护刚启动时(tick=0)App 窗口还没加到 WMS, 通知尚未 post, 那次 snooze 是空跑, 而下一次要等 50 分钟, 于是"重启后通知又出现"。现在改成启动后前 60 秒每轮都 snooze(把刚 post 的通知立刻按住), 之后每 10 分钟续(6 倍冗余)。v1.8.5~v1.8.8 的数值修正与采样优化全部保留。
+description=Redmi K90 Pro Max (myron / SM8850) 的 CPU/GPU 频率档位管理。v1.8.10 修守护进程与 WebUI 的多实例泄漏: soft-reboot 只重启 init 托管的用户态, 而 service.sh 里 nohup 出去的 __watch 挂在 pid 1 下不归它管, 重启后仍然活着; 锁文件只记录最新一个 pid, 旧的判活失败后又被起一份, 于是每重启一次多一份。实测累积 6 份 __watch 并发(每份 10 秒全量写一遍 sysfs 并和对端温控互相对写, 是持续待机耗电的直接来源), 同时 httpd 因端口从 8088 漂到 8089/8090 累积 3 份。现在 watch_run/hud_run/web_spawn 三个启动器都在 spawn 前按 argv 物理去重, __watch 每轮比对 watch.pid 所有权令牌(被顶替的一个 INTERVAL 内自己退出), cmd_boot 不再盲删 watch.lock, watch off / hud off 按 argv 全杀而不是只杀锁里那个; web_alive 的端口探测降频到每 4 轮一次以去掉每 tick 一次的 nc fork。v1.8.9 的通知 snooze 修复与 v1.8.5~v1.8.8 的数值修正全部保留。

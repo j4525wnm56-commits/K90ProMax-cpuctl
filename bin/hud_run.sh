@@ -2,21 +2,41 @@
 # HUD 守护启动器。
 # 和 watch_run.sh 同样的道理: 后台启动必须写在独立脚本里, 否则 mksh 会把调用方
 # 整个上下文 fork 成子 shell, 守护会自我复制。mkdir 原子锁保证单实例。
+# v1.8.10: 同 watch_run.sh, 软重启会让上一份 hud.sh loop 存活下来而锁被判失效,
+# 所以除了锁, 还要按 argv 物理去重。
 MODDIR=/data/adb/modules/k90_cpuctl
 STATE=/data/adb/k90_cpuctl
 LOCK="$STATE/hud.lock"
+PAT="bin/hud.sh loop"
 
 mkdir -p "$STATE"
+
+stray_pids() {
+    ps -A -o PID,ARGS 2>/dev/null \
+        | grep -F "$PAT" | grep -v grep \
+        | awk -v me="$$" '$1 != me { print $1 }'
+}
+
+kill_strays() {
+    _pids=$(stray_pids)
+    for _p in $_pids; do kill "$_p" 2>/dev/null; done
+    [ -n "$_pids" ] && sleep 1
+    _pids=$(stray_pids)
+    for _p in $_pids; do kill -9 "$_p" 2>/dev/null; done
+}
 
 # 陈旧锁处理: 上次被 kill -9 / pkill 强杀时锁目录会留在磁盘上,
 # 直接 mkdir 会失败并永久拒绝重启(实测踩过)。这里先判断 pid 是否真的活着。
 if [ -d "$LOCK" ]; then
     _p=$(cat "$LOCK/pid" 2>/dev/null)
-    if [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null; then
+    if [ -n "$_p" ] && kill -0 "$_p" 2>/dev/null \
+       && ps -A -o PID,ARGS 2>/dev/null | grep -F "$PAT" | grep -q "^ *$_p "; then
         exit 0          # 真的在跑, 不重复启动
     fi
     rm -rf "$LOCK"      # 残留锁, 清掉继续
 fi
+
+kill_strays
 
 mkdir "$LOCK" 2>/dev/null || exit 0
 
