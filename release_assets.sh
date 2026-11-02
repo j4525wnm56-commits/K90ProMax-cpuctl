@@ -64,12 +64,16 @@ except Exception: pass
       --data-binary "@$path" -w "%{http_code}" -o "$JSON_TMP.asset" \
       "https://uploads.github.com/repos/$REPO/releases/$RID/assets?name=$nm")
     if [ "$c" = "201" ]; then
-      python3 -c "
-import json
-d=json.load(open('$JSON_TMP.asset'))
+      # 【坑】路径必须走 argv，不能拼进 Python 源码：
+      #   Windows 的临时路径含反斜杠，拼进单引号字符串会被当成转义，
+      #   报 unicodeescape / truncated \UXXXXXXXX。资产其实已上传成功，
+      #   只是打印这行崩了，整个发版被 set -e 判为失败。
+      python3 - "$JSON_TMP.asset" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
 print('  资产:', d['name'], d['size'], 'bytes')
 print('    ', d['browser_download_url'])
-"
+PY
       return 0
     fi
     echo "  第 $i 次 HTTP=$c，重试..."
