@@ -1,0 +1,6 @@
+id=k90_vmtune
+name=K90 Pro Max VM 参数持久化
+version=v1.0
+versionCode=1
+author=Langrm
+description=开机应用 vm.min_free_kbytes=262144 与 vm.page-cluster=2，并常驻看门狗防止运行期漂移。排查结论: /data/adb/service.d 路径本身是正常的(powertune.log 里有 7 条 boot apply)，真正原因是写进去的值会在运行期被内核重算覆盖 —— 11-02 17:06 写入 262144，11-09 读到 22528，期间没有重启；且首次记录的默认值是 11584，与后来的 22528 不同，符合内核重算内存水位的特征。所以本模块走 KernelSU 模块 service.sh 开机应用 + 每 300 秒巡检，发现漂移立即重写并记日志。去重使用 mkdir 原子锁 + /proc cmdline 校验持有者，避免 soft reboot 后累积多份(主模块 __watch 曾累积 6 份)。

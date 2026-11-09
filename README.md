@@ -541,6 +541,22 @@ python tools/mask_status_icons.py shot.png             # 确认后原地打码
 
 ⚠️ **图形一旦进了 git 历史就删不干净**：早期有一版未打码的预览图还留在提交 `a2fba6e` 里，按 SHA 依然能打开（`.../blob/a2fba6e/docs/hud-preview.png`）。要彻底清掉只能重写历史 + force-push，代价是所有克隆都要重新同步，所以默认不做。
 
+## 配套子模块：vmtune（内存参数持久化）
+
+仓库里另有一个 `vmtune/` 目录，是**独立模块** `k90_vmtune` 的源码。它不参与本模块打包（`package.sh` 已排除），装不装与调频功能无关，两者互不干扰。
+
+它解决的是另一类问题：`vm.min_free_kbytes` / `vm.page-cluster` 写进去之后，会在运行期被内核重算覆盖。实测 `2026-11-02 17:06` 写入 `262144`，`2026-11-09` 读到 `22528`，**期间没有任何重启**；而 `/data/adb/service.d/99-k90-powertune.sh` 的日志里有 7 条 `boot apply`，说明开机执行路径本身是好的——只写一次永远会被改回去。
+
+所以它做三件事：开机等 `boot_completed` 后应用 → 起一个每 300 秒巡检的看门狗，发现漂移立刻重写并记 `drift` 日志 → 用 `mkdir` 原子锁 + `/proc/PID/cmdline` 校验去重，避免 soft-reboot 后累积多份（和本模块 `__watch` 踩的是同一个坑）。
+
+完整的排查时间线、实测验证和局限（**它治不了 CPU 侧的病**）见 [`vmtune/README.md`](vmtune/README.md)。
+
+```bash
+cd vmtune && ./deploy.sh          # 推模块并立即生效，免重启
+```
+
+---
+
 ## 卸载
 
 管理器里删除模块即可。`uninstall.sh` 依次：停守护 → 停界面 → 读快照还原 CPU/GPU → 清理运行状态（**保留备份文件**）。
