@@ -8,6 +8,14 @@ ADB="${ADB:-adb}"
 SERIAL="${1:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# 兼容两种目录布局：仓库里是 vmtune/*.sh，独立部署包里是某目录/k90_vmtune/*.sh
+if [ -f "$HERE/module.prop" ]; then
+    SRC="$HERE"
+else
+    SRC="$HERE/k90_vmtune"
+fi
+[ -f "$SRC/module.prop" ] || { echo "找不到 module.prop（$SRC）"; exit 1; }
+
 if [ -z "$SERIAL" ]; then
     SERIAL=$("$ADB" devices | awk 'NR>1 && $2=="device"{print $1; exit}')
 fi
@@ -25,7 +33,7 @@ echo "== 检查 root =="
 echo "== 上传模块 =="
 "$ADB" -s "$SERIAL" shell "su -c 'rm -rf $DST && mkdir -p $DST'"
 for f in module.prop service.sh uninstall.sh; do
-    "$ADB" -s "$SERIAL" push "$HERE/$f" "/data/local/tmp/$f" >/dev/null
+    "$ADB" -s "$SERIAL" push "$SRC/$f" "/data/local/tmp/$f" >/dev/null
     "$ADB" -s "$SERIAL" shell "su -c 'cp /data/local/tmp/$f $DST/$f && rm -f /data/local/tmp/$f'"
 done
 "$ADB" -s "$SERIAL" shell "su -c 'chmod 755 $DST/service.sh $DST/uninstall.sh; chmod 644 $DST/module.prop'"
